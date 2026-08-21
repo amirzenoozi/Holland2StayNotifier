@@ -1,0 +1,16 @@
+{
+  "cities": [
+    "Utrecht",
+    "Nijmegen",
+    "Zeist",
+    "Nieuwegein",
+    "Maarssen",
+    "Amersfoort"
+  ],
+  "telegram": {
+    "chat_id": -1001900208566,
+    "topic_id": 184
+  },
+  "max_new_per_cycle": 25,
+  "max_lookups_per_cycle": 15
+}

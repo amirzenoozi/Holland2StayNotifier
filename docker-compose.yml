@@ -1,0 +1,30 @@
+services:
+  h2snotifier:
+    image: ghcr.io/amirzenoozi/holland2staynotifier:latest
+    # To build from source instead of pulling the published image:
+    #   docker compose build   (after uncommenting the line below)
+    # build: ./h2snotifier
+    container_name: h2snotifier
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Seconds between checks. 3600 keeps Firecrawl usage inside the
+      # 1000 credits/month plan (worst case 1 credit per check = ~720/month).
+      # The sitemap is fetched directly first, which is free when Cloudflare
+      # allows it, so real usage is normally far lower.
+      RUN_INTERVAL: 3600
+    volumes:
+      # Cities to watch + Telegram chat/topic. Edit, then `docker compose restart`.
+      - ./config.json:/app/config.json:ro
+      # Seen listings and the learned street->city map. Deleting this volume
+      # makes the next run re-seed silently rather than spam the chat.
+      - h2s_data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  h2s_data:

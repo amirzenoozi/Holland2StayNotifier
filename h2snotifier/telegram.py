@@ -1,56 +1,46 @@
-import os
-import requests
-import random
-import json
-from urllib.parse import quote
+"""
+Minimal Telegram client.
 
-from io import BytesIO
-from PIL import Image
+Supports forum topics: when `message_thread_id` is set, messages land in that
+topic instead of the group's General thread.
+"""
+
 import logging
+import time
+
+import requests
+
+log = logging.getLogger(__name__)
 
 
 class TelegramBot:
-    def __init__(self, apikey, chat_id):
+    def __init__(self, apikey, chat_id, message_thread_id=None):
         self.apikey = apikey
         self.chat_id = chat_id
+        self.message_thread_id = message_thread_id
 
-    def send_media_group(self, images, caption=None, reply_to_message_id=None):
-        send_media_group = f"https://api.telegram.org/bot{self.apikey}/sendMediaGroup"
-        files = {}
-        media = []
-        for i, img in enumerate(images):
-            with BytesIO() as output:
-                try:
-                    img = Image.open(requests.get(img, stream=True).raw)
-                    img.save(output, format="PNG")
-                    output.seek(0)
-                    name = f"photo-{random.random()}-{i}.png"
-                    files[name] = output.read()
-                    img.save(name)
-                    media.append(dict(type="photo", media=f"attach://{name}"))
-                except Exception as e:
-                    logging.error(f"Error processing image: {img}, Error: {e}")
-                    debug_telegram.send_simple_msg(f"Error processing image: {img}")
-                    debug_telegram.send_simple_msg(str(e))
-                    continue
-        if media:
-            media[0]["caption"] = caption
-            resp = requests.post(
-                send_media_group,
-                data={
-                    "media": json.dumps(media),
-                    "chat_id": self.chat_id,
-                    "reply_to_message_id": reply_to_message_id,
-                },
-                files=files,
-            )
-            for img in files.keys():
-                os.remove(img)
-            return resp
-        else:
-            return None
+    def send_simple_msg(self, msg, retries=2):
+        url = f"https://api.telegram.org/bot{self.apikey}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": msg,
+            "disable_web_page_preview": True,
+        }
+        if self.message_thread_id:
+            payload["message_thread_id"] = self.message_thread_id
 
-    def send_simple_msg(self, msg):
-        room_desc_encoded = quote(msg.encode("utf8"))
-        url = f"https://api.telegram.org/bot{self.apikey}/sendMessage?chat_id={self.chat_id}&text={room_desc_encoded}"
-        return requests.get(url)
+        for attempt in range(retries + 1):
+            response = requests.post(url, data=payload, timeout=30)
+            if response.ok:
+                return response
+
+            # Telegram asks us to back off when the group limit is hit.
+            if response.status_code == 429 and attempt < retries:
+                wait = response.json().get("parameters", {}).get("retry_after", 5)
+                log.warning("rate limited by Telegram, sleeping %ss", wait)
+                time.sleep(wait + 1)
+                continue
+
+            log.error("telegram send failed: %s %s", response.status_code, response.text[:200])
+            return response
+        return response

@@ -161,6 +161,10 @@ cython_debug/
 #.idea/
 
 
+# Runtime secrets and state (never commit these)
+.env
+config.json
+*.db
 h2snotifier/config.json
 h2snotifier/houses.db
 h2snotifier/house_sync.log
