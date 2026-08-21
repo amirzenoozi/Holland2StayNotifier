@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS listings (
     url_key    TEXT PRIMARY KEY,
     city       TEXT,
     notified   INTEGER NOT NULL DEFAULT 0,
-    first_seen TEXT NOT NULL
+    first_seen TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'h2s'
 );
 CREATE TABLE IF NOT EXISTS streets (
     prefix     TEXT PRIMARY KEY,
@@ -49,33 +50,47 @@ def _connect():
 def init():
     with _connect() as connection:
         connection.executescript(SCHEMA)
+        # Databases seeded before Funda support lack the source column. Every
+        # row already in them came from Holland2Stay, which is the default.
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(listings)")
+        }
+        if "source" not in columns:
+            connection.execute(
+                "ALTER TABLE listings ADD COLUMN source TEXT NOT NULL DEFAULT 'h2s'"
+            )
 
 
-def known_keys():
-    """Every url_key we have ever recorded."""
+def known_keys(source=None):
+    """Every url_key we have recorded, optionally for one source only."""
     with _connect() as connection:
-        rows = connection.execute("SELECT url_key FROM listings").fetchall()
+        if source is None:
+            rows = connection.execute("SELECT url_key FROM listings").fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT url_key FROM listings WHERE source = ?", (source,)
+            ).fetchall()
     return {row[0] for row in rows}
 
 
-def record(url_key, city=None, notified=False):
+INSERT_SQL = (
+    "INSERT OR IGNORE INTO listings (url_key, city, notified, first_seen, source) "
+    "VALUES (?, ?, ?, ?, ?)"
+)
+
+
+def record(url_key, city=None, notified=False, source="h2s"):
     with _connect() as connection:
         connection.execute(
-            "INSERT OR IGNORE INTO listings (url_key, city, notified, first_seen) "
-            "VALUES (?, ?, ?, ?)",
-            (url_key, city, 1 if notified else 0, _now()),
+            INSERT_SQL, (url_key, city, 1 if notified else 0, _now(), source)
         )
 
 
-def record_many(url_keys, city=None, notified=False):
+def record_many(url_keys, city=None, notified=False, source="h2s"):
     stamp = _now()
-    rows = [(key, city, 1 if notified else 0, stamp) for key in url_keys]
+    rows = [(key, city, 1 if notified else 0, stamp, source) for key in url_keys]
     with _connect() as connection:
-        connection.executemany(
-            "INSERT OR IGNORE INTO listings (url_key, city, notified, first_seen) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
-        )
+        connection.executemany(INSERT_SQL, rows)
 
 
 def street_city(prefix):

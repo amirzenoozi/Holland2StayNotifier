@@ -1,16 +1,26 @@
 {
-  "cities": [
-    "Utrecht",
-    "Nijmegen",
-    "Zeist",
-    "Nieuwegein",
-    "Maarssen",
-    "Amersfoort"
-  ],
   "telegram": {
-    "chat_id": -1001900208566,
+    "chat_id": -1001234567890,
     "topic_id": 184
   },
   "max_new_per_cycle": 25,
-  "max_lookups_per_cycle": 15
+
+  "holland2stay": {
+    "enabled": true,
+    "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort"],
+    "max_lookups_per_cycle": 15
+  },
+
+  "funda": {
+    "enabled": true,
+    "searches": [
+      {
+        "name": "Amersfoort 10km",
+        "area": "amersfoort",
+        "radius": "10km",
+        "type": "huur",
+        "price": "1000-2000"
+      }
+    ]
+  }
 }

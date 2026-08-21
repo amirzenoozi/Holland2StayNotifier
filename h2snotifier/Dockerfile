@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY source.py store.py telegram.py main.py ./
+COPY fetcher.py h2s.py funda.py store.py telegram.py main.py ./
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /data
 

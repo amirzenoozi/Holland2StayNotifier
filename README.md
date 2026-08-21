@@ -1,146 +1,203 @@
-# Holland2Stay Notifier
+# Rental Notifier — Holland2Stay + Funda
 
-Watches [Holland2Stay](https://www.holland2stay.com) for new rental listings and posts them to a Telegram chat — or to a specific **topic** inside a Telegram forum group.
+Watches Dutch rental listings and posts new ones to a Telegram group — optionally
+into a specific **forum topic**, so the alerts stay out of your normal chat.
+
+Two sources, polled independently:
+
+| Source | What it watches | Filter |
+| --- | --- | --- |
+| **Holland2Stay** | every residence in their sitemap | by city |
+| **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… |
+
+You can enable either or both.
 
 ```
-🏠 Berg en Dalseweg 79A110
-📍 Nijmegen
-💶 €1,658.00 excl.
-📐 44.5 m2 · Loft
-📅 Available per September 22, 2026
-https://www.holland2stay.com/residences/berg-en-dalseweg-79a110.html
+🏠 Botter 38
+📍 3863 ED Nijkerk  ·  Funda
+💶 €1.600
+📐 133 m²  ·  4 rooms  ·  Huis  ·  energy A
+https://www.funda.nl/detail/huur/nijkerk/huis-botter-38/43812345/
 ```
-
----
 
 ## Why this fork exists
 
-The original project scraped `api.holland2stay.com/graphql`. That endpoint is **closed** — every query now returns `Forbidden / graphql-authorization` — and the whole site sits behind Cloudflare Turnstile, which also defeats the `cloudscraper` workaround other forks adopted. Upstream has been unmaintained since June 2024.
+The original [JafarAkhondali/Holland2StayNotifier](https://github.com/JafarAkhondali/Holland2StayNotifier)
+no longer works, and cannot be fixed by configuration:
 
-This fork replaces the data layer entirely:
+- `api.holland2stay.com/graphql` — the endpoint the whole app was built on — now
+  answers `Forbidden / graphql-authorization` to **every** query, even `{__typename}`.
+  The public Magento API was closed.
+- The site was rebuilt as a Next.js app behind **Cloudflare Turnstile**.
+  `cloudscraper` (the fix both maintained forks adopted) gets a challenge page,
+  and so does a Googlebot user agent.
+- Upstream's last commit is June 2024; its issue #12 is literally
+  "graphql returns 403", unanswered.
 
 | | Original | This fork |
-|---|---|---|
-| Data source | Magento GraphQL API | `sitemap.xml` + listing detail pages |
-| New-listing signal | API `available_to_book` filter | diff of listing URL keys against SQLite |
-| Blocking | broken by Cloudflare | direct fetch first, [Firecrawl](https://firecrawl.dev) as fallback |
-| City filter | numeric city IDs | learned street → city map |
-| Scheduling | external cron | self-contained loop in the container |
-| Telegram target | chat only | chat **or forum topic** |
+| --- | --- | --- |
+| Data source | Magento GraphQL API | sitemap + page scraping |
+| Cloudflare | blocked | handled |
+| Sources | Holland2Stay | Holland2Stay **+ Funda** |
+| Telegram topics | ✗ | ✓ |
+| Scheduling | host cron | built into the container |
+| Deploy | manual venv | `docker compose up -d` |
+| Image | — | published to GHCR by CI |
 
 ### How it works
 
-1. Fetch `sitemap.xml` (~200 live listings). Plain HTTP is tried first and is free; if Cloudflare blocks it, Firecrawl is used at a cost of 1 credit.
-2. Diff the listing keys against SQLite. **The very first run records everything silently** so you don't get 200 messages at once.
-3. For each genuinely new key, look up the street prefix (`berg-en-dalseweg-79a110` → `berg-en-dalseweg`) in a learned cache. Known non-target city ⇒ skipped for free.
-4. Otherwise fetch that one detail page as markdown (1 credit), parse it, and remember the street's city forever.
-5. Post to Telegram if the city is one you're watching.
+**Holland2Stay** — `/sitemap.xml` is fetched first over plain HTTP (free); if
+Cloudflare blocks it, the fetch falls back to [Firecrawl](https://firecrawl.dev)
+(1 credit). The set of listing keys is diffed against SQLite. Only genuinely new
+keys trigger a detail-page fetch, and each street's city is cached the first time
+it is seen — so a new listing in an already-known building is filtered by city
+for free, and listings outside your cities are never fetched at all.
 
-Steady-state cost is roughly **one credit per cycle plus one per new listing in your cities** — comfortably inside Firecrawl's free 1,000 credits/month at hourly checks.
+**Funda** — blocks plain HTTP outright, so its search pages always go through
+Firecrawl (1 credit). A single search page carries full listing data for ~15
+listings, so there is no per-listing fetch. `sort=date_down` keeps the newest
+first, which makes pagination unnecessary.
 
----
+**The first run of each source is silent.** Everything currently listed is
+recorded as already-seen so you are not flooded with a hundred messages. Enabling
+a second source later only seeds that source.
 
 ## Quick start
 
-You need a server with Docker, a Telegram bot, and a [Firecrawl API key](https://firecrawl.dev) (free tier is enough).
+You need Docker, a Telegram bot token, and a [Firecrawl API key](https://firecrawl.dev)
+(the free tier covers hourly polling).
 
 ```bash
-mkdir h2snotifier && cd h2snotifier
+mkdir rental-notifier && cd rental-notifier
 curl -O https://raw.githubusercontent.com/amirzenoozi/Holland2StayNotifier/main/docker-compose.yml
 curl -o .env https://raw.githubusercontent.com/amirzenoozi/Holland2StayNotifier/main/.env.example
 curl -o config.json https://raw.githubusercontent.com/amirzenoozi/Holland2StayNotifier/main/config.example.json
 
 # fill in both files, then:
-chmod 600 .env config.json
 docker compose up -d
 docker compose logs -f
 ```
 
-Stop it with `docker compose down`. State lives in a named volume, so stopping and starting never re-sends old listings.
+Those three files are all the host needs — the image comes from GHCR.
 
 ### `.env`
 
 ```ini
-TELEGRAM_API_KEY=123456789:AAF...     # from @BotFather
-DEBUGGING_CHAT_ID=-1001234567890      # where errors get reported
-FIRECRAWL_API_KEY=fc-...              # from firecrawl.dev
+TELEGRAM_API_KEY=123456:ABC-your-bot-token
+FIRECRAWL_API_KEY=fc-your-key
+DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 ```
 
 ### `config.json`
 
 ```json
 {
-  "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort"],
   "telegram": { "chat_id": -1001234567890, "topic_id": 184 },
   "max_new_per_cycle": 25,
-  "max_lookups_per_cycle": 15
+
+  "holland2stay": {
+    "enabled": true,
+    "cities": ["Utrecht", "Nijmegen", "Amersfoort"],
+    "max_lookups_per_cycle": 15
+  },
+
+  "funda": {
+    "enabled": true,
+    "searches": [
+      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" }
+    ]
+  }
 }
 ```
 
-| Key | Meaning |
-|---|---|
-| `cities` | City names exactly as Holland2Stay writes them. Omit or leave empty to get every city. |
-| `telegram.chat_id` | Group ID, including the `-100` prefix. |
-| `telegram.topic_id` | Forum topic ID. Omit for a normal group. |
-| `max_new_per_cycle` | If more new listings than this appear at once (a site change, or a wiped database), absorb them silently instead of flooding the chat. |
-| `max_lookups_per_cycle` | Hard ceiling on paid detail fetches per cycle. |
+Omit `topic_id` to post in the group's main thread.
 
-**Cities currently served:** Amersfoort, Amsterdam, Arnhem, Capelle aan den IJssel, Delft, Den Bosch, Den Haag, Diemen, Dordrecht, Eindhoven, Groningen, Haarlem, Helmond, Leiden, Maarssen, Maastricht, Nieuwegein, Nijmegen, Rijswijk, Rotterdam, Sittard, Tilburg, Utrecht, Velp, Zeist, Zoetermeer.
+**Holland2Stay cities** (exact spelling): Amersfoort, Amsterdam, Arnhem,
+Capelle aan den IJssel, Delft, Den Bosch, Den Haag, Diemen, Dordrecht, Eindhoven,
+Groningen, Haarlem, Helmond, Leiden, Maarssen, Maastricht, Nieuwegein, Nijmegen,
+Rijswijk, Rotterdam, Sittard, Tilburg, Utrecht, Velp, Zeist, Zoetermeer.
+
+**Funda searches** take either structured fields (`area`, `radius`, `price`,
+`type`, `object_type`, `rooms`, `bedrooms`, `floor_area`) or — better — a raw
+`url`. Tune the filters on funda.nl until the results look right, copy the
+address bar, and paste it:
+
+```json
+{ "name": "Nijkerk area", "url": "https://www.funda.nl/zoeken/huur?selected_area=%5B%22nijkerk,15km%22%5D&price=%221000-2000%22&sort=%22date_down%22" }
+```
+
+That gives you every filter Funda has without this project needing to model any
+of them. Add `"sort=%22date_down%22"` so the newest listings stay on page one.
 
 ### Finding your chat and topic IDs
 
-Open the target topic in Telegram Web and copy the message link — `https://t.me/c/1900208566/184/185` means:
-
-- `chat_id` = `-1001900208566` (prefix `-100` to the first number)
-- `topic_id` = `184` (the second number)
-
-Add the bot to the group and **make it an admin**, otherwise it cannot post.
-
----
+Open the target topic in Telegram Web and copy a message link — it looks like
+`https://t.me/c/1900208566/184/185`. Then `chat_id` is `-100` + the first number
+(`-1001900208566`) and `topic_id` is the second (`184`). **Add the bot to the
+group as an admin**, or it cannot post.
 
 ## Configuration reference
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `RUN_INTERVAL` | `3600` | Seconds between checks. Lower it only if you have Firecrawl credits to spare. |
-| `CONFIG_PATH` | `/app/config.json` | Config file location inside the container. |
-| `DB_PATH` | `/data/listings.db` | SQLite state file. |
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RUN_INTERVAL` | `3600` | seconds between polls |
+| `CONFIG_PATH` | `/app/config.json` | config location in the container |
+| `DB_PATH` | `/data/listings.db` | SQLite state (persisted in a volume) |
+
+| Config key | Default | Meaning |
+| --- | --- | --- |
+| `max_new_per_cycle` | `25` | more new listings than this in one cycle are absorbed silently (guards against a site-wide relist spamming the group) |
+| `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle |
+
+**On the interval and cost.** Each poll can cost 1 Firecrawl credit per source,
+so hourly ≈ 720/month per source against a 1,000/month free plan. Holland2Stay
+often succeeds over free plain HTTP, but do not assume it. Lower `RUN_INTERVAL`
+only if your plan has room.
 
 ## Operating
 
 ```bash
-docker compose logs -f                      # watch
-docker compose restart                      # apply config.json changes
-docker compose pull && docker compose up -d # upgrade to the latest image
-docker exec h2snotifier python main.py      # force a check right now
-docker compose down -v                      # wipe state (next run re-seeds silently)
+docker compose up -d        # start
+docker compose down         # stop
+docker compose logs -f      # watch
+docker compose pull && docker compose up -d   # update to the latest image
+docker compose restart      # apply config.json changes
 ```
+
+State lives in the `h2s_data` volume. Deleting it makes the next run re-seed
+silently — it will not re-notify you about everything.
 
 ## Building locally
 
-Uncomment the `build:` line in `docker-compose.yml`, then `docker compose up -d --build`. Images for `linux/amd64` and `linux/arm64` are otherwise published to `ghcr.io/amirzenoozi/holland2staynotifier:latest` by GitHub Actions on every push to `main`.
+Uncomment the `build:` line in `docker-compose.yml`, comment out `image:`, then
+`docker compose up -d --build`.
 
 ## Layout
 
 ```
-docker-compose.yml          # what you deploy
-.env.example                # secrets template
-config.example.json         # cities + Telegram target template
+docker-compose.yml        # what you run
+.env.example
+config.example.json
 h2snotifier/
-├── main.py                 # one cycle: diff, enrich, notify
-├── source.py               # sitemap + detail fetching and parsing
-├── store.py                # SQLite: seen listings, learned streets
-├── telegram.py             # topic-aware sendMessage with 429 handling
-├── entrypoint.sh           # run / sleep loop, replaces cron
-└── Dockerfile
+  main.py                 # orchestrates a cycle over enabled sources
+  fetcher.py              # shared plain-HTTP + Firecrawl fetch layer
+  h2s.py                  # Holland2Stay: sitemap + detail parsing
+  funda.py                # Funda: search page parsing
+  store.py                # SQLite: seen listings + street→city cache
+  telegram.py             # sendMessage with topic support
+.github/workflows/docker-publish.yml   # builds and pushes to GHCR
 ```
 
 ## Caveats
 
-- Detail-page markdown omits the inclusive price and occupancy limit, so messages show the **exclusive** price.
-- Holland2Stay is rebranding to **Codomo**. When URLs change the sitemap parse will fail — you'll get an error in your debug chat rather than silence.
-- Scraping is inherently fragile. Treat this as a best-effort alert, not a guarantee.
+- Holland2Stay listings report the **exclusive** price only; the inclusive price
+  and occupancy sit behind a UI expander that is not in the page markup.
+- Funda's terms prohibit automated access. Hourly polling of one search page is
+  modest, but this is your call to make.
+- Holland2Stay is rebranding to **Codomo**; the URLs this depends on may move.
+- Scraped markup is not an API. When a site redesigns, parsing breaks — errors
+  are reported to `DEBUGGING_CHAT_ID` so you find out quickly.
 
 ## License
 
-See [LICENSE](LICENSE). Original project by [JafarAkhondali](https://github.com/JafarAkhondali/Holland2StayNotifier).
+MIT, as the original.

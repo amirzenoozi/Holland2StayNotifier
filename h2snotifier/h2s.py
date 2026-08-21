@@ -15,28 +15,18 @@ LLM extraction costs 5 credits per page instead of 1.
 """
 
 import logging
-import os
 import re
 
-import requests
+from fetcher import FetchError, direct_get, firecrawl
 
-FIRECRAWL_ENDPOINT = "https://api.firecrawl.dev/v2/scrape"
+NAME = "h2s"
 BASE = "https://www.holland2stay.com"
 SITEMAP_URL = f"{BASE}/sitemap.xml"
 
 # Matches the English listing pages in the sitemap (the /nl/ mirrors are ignored).
 LISTING_RE = re.compile(r"/residences/([^<\"]+?)\.html")
 
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
-
-log = logging.getLogger(__name__)
-
-
-class FetchError(Exception):
-    """Raised when a page could not be retrieved."""
+log = logging.getLogger(NAME)
 
 
 def listing_url(url_key):
@@ -64,61 +54,13 @@ def street_prefix(url_key):
     return "-".join(segments) if segments else url_key
 
 
-def _firecrawl(url, formats, timeout=180):
-    api_key = os.environ.get("FIRECRAWL_API_KEY")
-    if not api_key:
-        raise FetchError("FIRECRAWL_API_KEY is not set")
-
-    payload = {
-        "url": url,
-        "formats": formats,
-        "proxy": "basic",
-        "maxAge": 0,
-        "onlyMainContent": True,
-    }
-    try:
-        response = requests.post(
-            FIRECRAWL_ENDPOINT,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise FetchError(f"Firecrawl request failed for {url}: {exc}") from exc
-
-    if response.status_code != 200:
-        raise FetchError(f"Firecrawl HTTP {response.status_code} for {url}: {response.text[:200]}")
-
-    body = response.json()
-    if not body.get("success"):
-        raise FetchError(f"Firecrawl returned failure for {url}: {str(body)[:200]}")
-    return body.get("data", {})
-
-
-def _sitemap_direct():
-    """
-    Try to grab the sitemap without spending a credit.
-
-    Cloudflare currently blocks this, but it costs nothing to try and it will
-    silently start saving credits again if they ever relax the rule.
-    """
-    try:
-        response = requests.get(
-            SITEMAP_URL, headers={"User-Agent": BROWSER_UA}, timeout=30
-        )
-    except requests.RequestException:
-        return None
-    if response.status_code == 200 and "<loc>" in response.text:
-        log.info("sitemap fetched directly (0 credits)")
-        return response.text
-    return None
-
-
 def fetch_listing_keys():
     """Return the set of url_keys currently advertised in the sitemap."""
-    xml = _sitemap_direct()
-    if xml is None:
-        data = _firecrawl(SITEMAP_URL, ["rawHtml"])
+    xml = direct_get(SITEMAP_URL, expect="<loc>")
+    if xml is not None:
+        log.info("sitemap fetched directly (0 credits)")
+    else:
+        data = firecrawl(SITEMAP_URL, ["rawHtml"])
         xml = data.get("rawHtml") or ""
         log.info("sitemap fetched via Firecrawl (1 credit)")
 
@@ -196,7 +138,7 @@ def parse_listing(markdown, url_key):
 
 def fetch_listing(url_key):
     """Fetch and parse one listing detail page. Costs 1 credit."""
-    data = _firecrawl(listing_url(url_key), ["markdown"])
+    data = firecrawl(listing_url(url_key), ["markdown"])
     markdown = data.get("markdown") or ""
     if not markdown:
         raise FetchError(f"empty markdown for {url_key}")
