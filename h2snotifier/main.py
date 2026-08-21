@@ -79,8 +79,14 @@ def listing_to_msg(listing):
     if flags:
         lines.append("ℹ️ " + ", ".join(flags))
 
-    lines.append(listing["url"])
+    # The URL is not repeated in the body - it lives in the inline button.
     return "\n".join(lines)
+
+
+def listing_button(listing):
+    """Inline button taking you straight to the listing page."""
+    label = SOURCE_LABEL.get(listing.get("source"), "listing")
+    return (f"🔗 View on {label}", listing["url"])
 
 
 def _seed(source, keys, debug):
@@ -95,7 +101,9 @@ def _seed(source, keys, debug):
 
 
 def _notify(listing, notifier, city=None):
-    response = notifier.send_simple_msg(listing_to_msg(listing))
+    response = notifier.send_simple_msg(
+        listing_to_msg(listing), button=listing_button(listing)
+    )
     ok = getattr(response, "ok", False)
     log.info("notified %s (%s) ok=%s", listing["url_key"], city or listing.get("city"), ok)
     time.sleep(3)

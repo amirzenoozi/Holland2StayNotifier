@@ -120,6 +120,7 @@ def parse_listing(markdown, url_key):
         return found.group(1) if found else None
 
     return {
+        "source": NAME,
         "url_key": url_key,
         "url": listing_url(url_key),
         "address": address,
