@@ -24,6 +24,15 @@ class FetchError(Exception):
     """A page could not be retrieved."""
 
 
+class SiteUnavailable(FetchError):
+    """
+    The site answered, but with an error or maintenance page.
+
+    This is transient by nature - the next cycle may well succeed - so callers
+    should skip the source quietly instead of raising the alarm.
+    """
+
+
 def direct_get(url, expect=None, timeout=30):
     """
     Try to fetch a URL without spending a credit.
@@ -77,4 +86,14 @@ def firecrawl(url, formats, timeout=180):
     body = response.json()
     if not body.get("success"):
         raise FetchError(f"Firecrawl returned failure for {url}: {str(body)[:200]}")
-    return body.get("data", {})
+
+    data = body.get("data", {})
+
+    # Firecrawl reports a fetch as successful even when the site itself served
+    # an error or maintenance page, so check what the site actually said.
+    status = data.get("metadata", {}).get("statusCode")
+    if isinstance(status, int) and status >= 400:
+        title = data.get("metadata", {}).get("title") or ""
+        raise SiteUnavailable(f"{url} returned HTTP {status} ({title.strip() or 'no title'})")
+
+    return data

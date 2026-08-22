@@ -14,7 +14,7 @@ import time
 import funda
 import h2s
 import store
-from fetcher import FetchError
+from fetcher import FetchError, SiteUnavailable
 from telegram import TelegramBot
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config.json")
@@ -220,6 +220,10 @@ def run_cycle(config, notifier, debug):
             continue
         try:
             runner(source_config, notifier, debug, max_new)
+        except SiteUnavailable as exc:
+            # Maintenance windows and 5xx blips clear on their own; there is
+            # nothing to act on, so stay quiet and try again next cycle.
+            log.warning("%s: source unavailable, skipping this cycle (%s)", name, exc)
         except Exception as exc:  # one bad source must not stop the other
             log.exception("%s: cycle failed", name)
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
