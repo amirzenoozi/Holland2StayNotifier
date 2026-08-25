@@ -160,12 +160,17 @@ def run_h2s(config, notifier, debug, max_new):
                         len(new_keys) - new_keys.index(url_key))
             break
 
+        # Count the attempt, not the success: a page that fails still costs
+        # us a minute or more, and a run of failures must not turn one cycle
+        # into an hour of retries.
+        lookups += 1
         try:
             listing = h2s.fetch_listing(url_key)
         except FetchError as exc:
+            # Left unrecorded on purpose - most failures are transient and the
+            # next cycle retries them.
             log.error("h2s: could not fetch %s: %s", url_key, exc)
             continue
-        lookups += 1
 
         city = listing.get("city")
         if city:
