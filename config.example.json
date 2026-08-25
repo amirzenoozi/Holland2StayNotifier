@@ -22,5 +22,17 @@
         "price": "1000-2000"
       }
     ]
+  },
+
+  "huurwoningen": {
+    "enabled": true,
+    "searches": [
+      {
+        "name": "Amersfoort 10km",
+        "area": "amersfoort",
+        "radius": "10km",
+        "price": "1000-2000"
+      }
+    ]
   }
 }

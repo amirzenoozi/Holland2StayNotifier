@@ -10,9 +10,11 @@ import logging
 import os
 import sys
 import time
+from functools import partial
 
 import funda
 import h2s
+import huurwoningen
 import store
 from fetcher import FetchError, SiteUnavailable
 from telegram import TelegramBot
@@ -26,7 +28,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-SOURCE_LABEL = {"h2s": "Holland2Stay", "funda": "Funda"}
+SOURCE_LABEL = {
+    "h2s": "Holland2Stay",
+    "funda": "Funda",
+    "huurwoningen": "Huurwoningen",
+}
 
 
 def load_config():
@@ -52,13 +58,15 @@ def listing_to_msg(listing):
         lines.append(f"💶 €{excl} excl. / €{incl} incl.")
     elif excl or incl:
         lines.append(f"💶 €{excl or incl}")
+    elif listing.get("price_on_request"):
+        lines.append("💶 Price on request")
 
     facts = []
     if listing.get("area"):
         facts.append(f"{listing['area']} m²")
     if listing.get("rooms"):
         facts.append(f"{listing['rooms']} rooms")
-    for key in ("dwelling_type", "occupancy"):
+    for key in ("dwelling_type", "occupancy", "interior"):
         if listing.get(key):
             facts.append(str(listing[key]))
     if listing.get("energy"):
@@ -184,45 +192,49 @@ def run_h2s(config, notifier, debug, max_new):
             store.record(url_key, city=city, notified=True, source=h2s.NAME)
 
 
-def run_funda(config, notifier, debug, max_new):
-    """Funda: one search page carries everything, so no detail fetches."""
+def run_search_source(module, config, notifier, debug, max_new):
+    """
+    Funda and Huurwoningen both put the full listing data on the search page,
+    so a cycle is one fetch per configured search and no detail lookups.
+    """
+    name = module.NAME
     searches = config.get("searches", [])
     if not searches:
-        log.warning("funda: enabled but no searches configured")
+        log.warning("%s: enabled but no searches configured", name)
         return
 
-    known = store.known_keys(source=funda.NAME)
+    known = store.known_keys(source=name)
     found = {}
     for search in searches:
         try:
-            found.update(funda.fetch_search(search))
+            found.update(module.fetch_search(search))
         except FetchError as exc:
-            log.error("funda: search %r failed: %s", search.get("name"), exc)
+            log.error("%s: search %r failed: %s", name, search.get("name"), exc)
 
     if not found:
         return
 
     new_keys = sorted(set(found) - known)
-    log.info("funda: %d listings, %d new", len(found), len(new_keys))
+    log.info("%s: %d listings, %d new", name, len(found), len(new_keys))
 
     if not known:
-        return _seed(funda.NAME, set(found), debug)
+        return _seed(name, set(found), debug)
     if not new_keys:
         return
     if len(new_keys) > max_new:
-        store.record_many(new_keys, notified=True, source=funda.NAME)
-        log.warning("funda: %d new listings exceeds max_new_per_cycle", len(new_keys))
+        store.record_many(new_keys, notified=True, source=name)
+        log.warning("%s: %d new listings exceeds max_new_per_cycle", name, len(new_keys))
         if debug:
             debug.send_simple_msg(
-                f"Funda returned {len(new_keys)} new listings at once - "
-                "absorbed silently to avoid spam."
+                f"{SOURCE_LABEL.get(name, name)} returned {len(new_keys)} new "
+                "listings at once - absorbed silently to avoid spam."
             )
         return
 
     for url_key in new_keys:
         listing = found[url_key]
         ok = _notify(listing, notifier)
-        store.record(url_key, city=listing.get("city"), notified=ok, source=funda.NAME)
+        store.record(url_key, city=listing.get("city"), notified=ok, source=name)
 
 
 def run_cycle(config, notifier, debug):
@@ -230,11 +242,26 @@ def run_cycle(config, notifier, debug):
     max_new = config.get("max_new_per_cycle", 25)
     failures = []
 
-    for name, runner in (("holland2stay", run_h2s), ("funda", run_funda)):
+    runners = (
+        ("holland2stay", run_h2s),
+        ("funda", partial(run_search_source, funda)),
+        ("huurwoningen", partial(run_search_source, huurwoningen)),
+    )
+    for name, runner in runners:
         source_config = config.get(name, {})
         if not source_config.get("enabled", False):
             continue
+
+        # Every fetch of a paid source costs a Firecrawl credit, so a source
+        # may ask to be polled less often than the container's own loop.
+        wait = source_config.get("min_interval_minutes")
+        elapsed = store.minutes_since_run(name) if wait else None
+        if wait and elapsed is not None and elapsed < wait:
+            log.info("%s: last run %.0f min ago, waiting for %d", name, elapsed, wait)
+            continue
+
         try:
+            store.mark_run(name)
             runner(source_config, notifier, debug, max_new)
         except SiteUnavailable as exc:
             # Maintenance windows and 5xx blips clear on their own; there is

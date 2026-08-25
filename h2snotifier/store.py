@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS streets (
     city       TEXT NOT NULL,
     learned_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runs (
+    source  TEXT PRIMARY KEY,
+    ran_at  TEXT NOT NULL
+);
 """
 
 
@@ -108,6 +112,35 @@ def learn_street(prefix, city):
         connection.execute(
             "INSERT OR REPLACE INTO streets (prefix, city, learned_at) VALUES (?, ?, ?)",
             (prefix, city, _now()),
+        )
+
+
+def minutes_since_run(source):
+    """
+    Minutes since a source last polled, or None if it never has.
+
+    Sources that cost credits can be given a longer interval than the
+    container's own loop, so a cheap source stays hourly while an expensive
+    one runs every few hours.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT ran_at FROM runs WHERE source = ?", (source,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        previous = datetime.fromisoformat(row[0])
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - previous).total_seconds() / 60
+
+
+def mark_run(source):
+    with _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO runs (source, ran_at) VALUES (?, ?)",
+            (source, _now()),
         )
 
 

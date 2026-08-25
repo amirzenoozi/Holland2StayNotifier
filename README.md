@@ -1,24 +1,27 @@
-# Rental Notifier — Holland2Stay + Funda
+# Rental Notifier — Holland2Stay + Funda + Huurwoningen
 
 Watches Dutch rental listings and posts new ones to a Telegram group — optionally
 into a specific **forum topic**, so the alerts stay out of your normal chat.
 
-Two sources, polled independently:
+Three sources, polled independently:
 
 | Source | What it watches | Filter |
 | --- | --- | --- |
 | **Holland2Stay** | every residence in their sitemap | by city |
 | **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… |
+| **Huurwoningen** | any saved search you paste in | area + radius, price, rooms, interior, pets, garden… |
 
-You can enable either or both.
+Enable any combination.
 
 ```
 🏠 Botter 38
 📍 3863 ED Nijkerk  ·  Funda
 💶 €1.600
 📐 133 m²  ·  4 rooms  ·  Huis  ·  energy A
-https://www.funda.nl/detail/huur/nijkerk/huis-botter-38/43812345/
+[ 🔗 View on Funda ]
 ```
+
+Each message carries an inline button that opens the listing.
 
 ## Why this fork exists
 
@@ -38,7 +41,7 @@ no longer works, and cannot be fixed by configuration:
 | --- | --- | --- |
 | Data source | Magento GraphQL API | sitemap + page scraping |
 | Cloudflare | blocked | handled |
-| Sources | Holland2Stay | Holland2Stay **+ Funda** |
+| Sources | Holland2Stay | Holland2Stay **+ Funda + Huurwoningen** |
 | Telegram topics | ✗ | ✓ |
 | Scheduling | host cron | built into the container |
 | Deploy | manual venv | `docker compose up -d` |
@@ -53,10 +56,14 @@ keys trigger a detail-page fetch, and each street's city is cached the first tim
 it is seen — so a new listing in an already-known building is filtered by city
 for free, and listings outside your cities are never fetched at all.
 
-**Funda** — blocks plain HTTP outright, so its search pages always go through
-Firecrawl (1 credit). A single search page carries full listing data for ~15
-listings, so there is no per-listing fetch. `sort=date_down` keeps the newest
-first, which makes pagination unnecessary.
+**Funda** and **Huurwoningen** — both block plain HTTP outright, so their search
+pages always go through Firecrawl (1 credit each). A single search page carries
+full listing data for 15–25 listings, so there is no per-listing fetch. Both are
+sorted newest-first, which makes pagination unnecessary.
+
+Paid sources can be throttled independently with `min_interval_minutes`, so you
+can run the container hourly for Holland2Stay while only spending Firecrawl
+credits on the other two every few hours.
 
 **The first run of each source is silent.** Everything currently listed is
 recorded as already-seen so you are not flooded with a hundred messages. Enabling
@@ -103,8 +110,17 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "funda": {
     "enabled": true,
+    "min_interval_minutes": 120,
     "searches": [
       { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" }
+    ]
+  },
+
+  "huurwoningen": {
+    "enabled": true,
+    "min_interval_minutes": 120,
+    "searches": [
+      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "price": "1000-2000" }
     ]
   }
 }
@@ -129,6 +145,16 @@ address bar, and paste it:
 That gives you every filter Funda has without this project needing to model any
 of them. Add `"sort=%22date_down%22"` so the newest listings stay on page one.
 
+**Huurwoningen searches** work the same way: structured fields (`area`, `radius`,
+`price`, plus any extra query parameters under `params`) or a raw `url` copied
+from huurwoningen.nl:
+
+```json
+{ "name": "Nijkerk area", "url": "https://www.huurwoningen.nl/in/nijkerk/?price=1000-2000&radius=10" }
+```
+
+Its default sort is already newest-first, so no sort parameter is needed.
+
 ### Finding your chat and topic IDs
 
 Open the target topic in Telegram Web and copy a message link — it looks like
@@ -148,11 +174,13 @@ group as an admin**, or it cannot post.
 | --- | --- | --- |
 | `max_new_per_cycle` | `25` | more new listings than this in one cycle are absorbed silently (guards against a site-wide relist spamming the group) |
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle |
+| `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
 
-**On the interval and cost.** Each poll can cost 1 Firecrawl credit per source,
-so hourly ≈ 720/month per source against a 1,000/month free plan. Holland2Stay
-often succeeds over free plain HTTP, but do not assume it. Lower `RUN_INTERVAL`
-only if your plan has room.
+**On the interval and cost.** Each poll costs 1 Firecrawl credit per search page,
+so hourly ≈ 720 credits/month per source against a 1,000/month free plan. With
+two paid sources, hourly polling does not fit — set `min_interval_minutes: 120`
+on each (≈ 360/month each) and leave `RUN_INTERVAL` at an hour so Holland2Stay,
+which usually succeeds over free plain HTTP, keeps checking every cycle.
 
 ## Operating
 
@@ -183,7 +211,8 @@ h2snotifier/
   fetcher.py              # shared plain-HTTP + Firecrawl fetch layer
   h2s.py                  # Holland2Stay: sitemap + detail parsing
   funda.py                # Funda: search page parsing
-  store.py                # SQLite: seen listings + street→city cache
+  huurwoningen.py         # Huurwoningen: search page parsing
+  store.py                # SQLite: seen listings, street→city cache, run times
   telegram.py             # sendMessage with topic support
 .github/workflows/docker-publish.yml   # builds and pushes to GHCR
 ```
@@ -192,8 +221,10 @@ h2snotifier/
 
 - Holland2Stay listings report the **exclusive** price only; the inclusive price
   and occupancy sit behind a UI expander that is not in the page markup.
-- Funda's terms prohibit automated access. Hourly polling of one search page is
-  modest, but this is your call to make.
+- Funda and Huurwoningen both prohibit automated access in their terms. Polling
+  one search page every couple of hours is modest, but this is your call to make.
+- Huurwoningen shows `Prijs op aanvraag` on some listings; those are reported as
+  "Price on request" rather than skipped.
 - Holland2Stay is rebranding to **Codomo**; the URLs this depends on may move.
 - Scraped markup is not an API. When a site redesigns, parsing breaks — errors
   are reported to `DEBUGGING_CHAT_ID` so you find out quickly.
