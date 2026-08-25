@@ -127,13 +127,21 @@ def run_h2s(config, notifier, debug, max_new):
         return _seed(h2s.NAME, current, debug)
     if not new_keys:
         return
-    if len(new_keys) > max_new:
+    # Notifications here are self-limiting: each one needs a detail fetch, and
+    # those are capped by max_lookups_per_cycle. So a big diff is not a spam
+    # risk - anything we cannot afford this cycle stays unrecorded and is
+    # picked up by the next one. The only diff worth distrusting is one that
+    # replaces most of the sitemap, which means the site regenerated its URL
+    # scheme rather than listing hundreds of flats at once.
+    if len(new_keys) > max(max_new, len(current) // 2):
         store.record_many(new_keys, notified=True, source=h2s.NAME)
-        log.warning("h2s: %d new listings exceeds max_new_per_cycle", len(new_keys))
+        log.warning("h2s: %d of %d keys are new - treating as a URL scheme change",
+                    len(new_keys), len(current))
         if debug:
             debug.send_simple_msg(
-                f"Holland2Stay returned {len(new_keys)} new listings at once - "
-                "absorbed silently to avoid spam."
+                f"Holland2Stay changed {len(new_keys)} of {len(current)} listing "
+                "URLs at once - absorbed silently, this is a site change rather "
+                "than new homes."
             )
         return
 
@@ -146,7 +154,10 @@ def run_h2s(config, notifier, debug, max_new):
             store.record(url_key, city=city, notified=True, source=h2s.NAME)
             continue
         if lookups >= max_lookups:
-            log.warning("h2s: lookup budget reached, deferring the rest")
+            # Deferred keys are deliberately left unrecorded so the next cycle
+            # sees them as new and picks up where this one stopped.
+            log.warning("h2s: lookup budget spent, deferring %d listings to the next cycle",
+                        len(new_keys) - new_keys.index(url_key))
             break
 
         try:
