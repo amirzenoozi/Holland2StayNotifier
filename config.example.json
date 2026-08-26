@@ -3,16 +3,16 @@
     "chat_id": -1001234567890,
     "topic_id": 184
   },
-  "max_new_per_cycle": 25,
 
   "holland2stay": {
     "enabled": true,
     "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort"],
-    "max_lookups_per_cycle": 15
+    "max_lookups_per_cycle": 25
   },
 
   "funda": {
     "enabled": true,
+    "min_interval_minutes": 120,
     "searches": [
       {
         "name": "Amersfoort 10km",
@@ -26,6 +26,7 @@
 
   "huurwoningen": {
     "enabled": true,
+    "min_interval_minutes": 120,
     "searches": [
       {
         "name": "Amersfoort 10km",
@@ -34,5 +35,10 @@
         "price": "1000-2000"
       }
     ]
+  },
+
+  "ikwilhuren": {
+    "enabled": true,
+    "cities": ["Amersfoort", "Nijkerk", "Leusden", "Hoevelaken", "Barneveld", "Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen"]
   }
 }

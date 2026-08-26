@@ -3,6 +3,7 @@ Poll every enabled source once and notify about listings we have not seen.
 
 Each source is diffed independently against the database, so enabling a new
 one only floods that source's own first run - which we absorb silently.
+After that seed every new listing is sent, however many turn up at once.
 """
 
 import json
@@ -15,6 +16,7 @@ from functools import partial
 import funda
 import h2s
 import huurwoningen
+import ikwilhuren
 import store
 from fetcher import FetchError, SiteUnavailable
 from telegram import TelegramBot
@@ -32,6 +34,7 @@ SOURCE_LABEL = {
     "h2s": "Holland2Stay",
     "funda": "Funda",
     "huurwoningen": "Huurwoningen",
+    "ikwilhuren": "ikwilhuren.nu",
 }
 
 
@@ -118,7 +121,7 @@ def _notify(listing, notifier, city=None):
     return ok
 
 
-def run_h2s(config, notifier, debug, max_new):
+def run_h2s(config, notifier, debug):
     """
     Holland2Stay: the sitemap gives keys only, so the city lives behind a
     per-listing fetch. We cache street -> city to keep that fetch rare.
@@ -134,23 +137,6 @@ def run_h2s(config, notifier, debug, max_new):
     if not known:
         return _seed(h2s.NAME, current, debug)
     if not new_keys:
-        return
-    # Notifications here are self-limiting: each one needs a detail fetch, and
-    # those are capped by max_lookups_per_cycle. So a big diff is not a spam
-    # risk - anything we cannot afford this cycle stays unrecorded and is
-    # picked up by the next one. The only diff worth distrusting is one that
-    # replaces most of the sitemap, which means the site regenerated its URL
-    # scheme rather than listing hundreds of flats at once.
-    if len(new_keys) > max(max_new, len(current) // 2):
-        store.record_many(new_keys, notified=True, source=h2s.NAME)
-        log.warning("h2s: %d of %d keys are new - treating as a URL scheme change",
-                    len(new_keys), len(current))
-        if debug:
-            debug.send_simple_msg(
-                f"Holland2Stay changed {len(new_keys)} of {len(current)} listing "
-                "URLs at once - absorbed silently, this is a site change rather "
-                "than new homes."
-            )
         return
 
     lookups = 0
@@ -192,7 +178,7 @@ def run_h2s(config, notifier, debug, max_new):
             store.record(url_key, city=city, notified=True, source=h2s.NAME)
 
 
-def run_search_source(module, config, notifier, debug, max_new):
+def run_search_source(module, config, notifier, debug):
     """
     Funda and Huurwoningen both put the full listing data on the search page,
     so a cycle is one fetch per configured search and no detail lookups.
@@ -221,31 +207,54 @@ def run_search_source(module, config, notifier, debug, max_new):
         return _seed(name, set(found), debug)
     if not new_keys:
         return
-    if len(new_keys) > max_new:
-        store.record_many(new_keys, notified=True, source=name)
-        log.warning("%s: %d new listings exceeds max_new_per_cycle", name, len(new_keys))
-        if debug:
-            debug.send_simple_msg(
-                f"{SOURCE_LABEL.get(name, name)} returned {len(new_keys)} new "
-                "listings at once - absorbed silently to avoid spam."
-            )
-        return
 
+    # Everything new goes out, however many there are. _notify paces the sends
+    # and telegram.py backs off when Telegram asks it to.
     for url_key in new_keys:
         listing = found[url_key]
         ok = _notify(listing, notifier)
         store.record(url_key, city=listing.get("city"), notified=ok, source=name)
 
 
+def run_ikwilhuren(config, notifier, debug):
+    """
+    ikwilhuren.nu hands us the whole country in one free request, so the work
+    is filtering rather than fetching: we keep a record of every listing we
+    have seen (that is what makes the next diff correct) but only notify about
+    the cities being watched.
+    """
+    name = ikwilhuren.NAME
+    targets = {c.strip().lower() for c in config.get("cities", [])}
+
+    known = store.known_keys(source=name)
+    found = ikwilhuren.fetch_catalogue()
+    new_keys = sorted(set(found) - known)
+    log.info("%s: %d listings, %d new", name, len(found), len(new_keys))
+
+    if not known:
+        return _seed(name, set(found), debug)
+    if not new_keys:
+        return
+
+    for url_key in new_keys:
+        listing = found[url_key]
+        city = listing.get("city") or ""
+        if targets and city.strip().lower() not in targets:
+            store.record(url_key, city=city, notified=True, source=name)
+            continue
+        ok = _notify(listing, notifier, city)
+        store.record(url_key, city=city, notified=ok, source=name)
+
+
 def run_cycle(config, notifier, debug):
     store.init()
-    max_new = config.get("max_new_per_cycle", 25)
     failures = []
 
     runners = (
         ("holland2stay", run_h2s),
         ("funda", partial(run_search_source, funda)),
         ("huurwoningen", partial(run_search_source, huurwoningen)),
+        ("ikwilhuren", run_ikwilhuren),
     )
     for name, runner in runners:
         source_config = config.get(name, {})
@@ -262,7 +271,7 @@ def run_cycle(config, notifier, debug):
 
         try:
             store.mark_run(name)
-            runner(source_config, notifier, debug, max_new)
+            runner(source_config, notifier, debug)
         except SiteUnavailable as exc:
             # Maintenance windows and 5xx blips clear on their own; there is
             # nothing to act on, so stay quiet and try again next cycle.

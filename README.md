@@ -1,15 +1,16 @@
-# Rental Notifier — Holland2Stay + Funda + Huurwoningen
+# Rental Notifier — Holland2Stay + Funda + Huurwoningen + ikwilhuren.nu
 
 Watches Dutch rental listings and posts new ones to a Telegram group — optionally
 into a specific **forum topic**, so the alerts stay out of your normal chat.
 
-Three sources, polled independently:
+Four sources, polled independently:
 
-| Source | What it watches | Filter |
-| --- | --- | --- |
-| **Holland2Stay** | every residence in their sitemap | by city |
-| **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… |
-| **Huurwoningen** | any saved search you paste in | area + radius, price, rooms, interior, pets, garden… |
+| Source | What it watches | Filter | Cost |
+| --- | --- | --- | --- |
+| **Holland2Stay** | every residence in their sitemap | by city | free, or 1 credit if Cloudflare blocks |
+| **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… | 1 credit per poll |
+| **Huurwoningen** | any saved search you paste in | area + radius, price, rooms, interior, pets, garden… | 1 credit per poll |
+| **ikwilhuren.nu** | their whole national catalogue | by city | free |
 
 Enable any combination.
 
@@ -41,7 +42,7 @@ no longer works, and cannot be fixed by configuration:
 | --- | --- | --- |
 | Data source | Magento GraphQL API | sitemap + page scraping |
 | Cloudflare | blocked | handled |
-| Sources | Holland2Stay | Holland2Stay **+ Funda + Huurwoningen** |
+| Sources | Holland2Stay | Holland2Stay **+ Funda + Huurwoningen + ikwilhuren.nu** |
 | Telegram topics | ✗ | ✓ |
 | Scheduling | host cron | built into the container |
 | Deploy | manual venv | `docker compose up -d` |
@@ -61,13 +62,20 @@ pages always go through Firecrawl (1 credit each). A single search page carries
 full listing data for 15–25 listings, so there is no per-listing fetch. Both are
 sorted newest-first, which makes pagination unnecessary.
 
+**ikwilhuren.nu** has no bot protection at all, so it never costs a credit. Its
+search form is a POST, but the server ignores the filter fields — so the notifier
+does the opposite of what the form intends: it asks for the whole catalogue in
+one request (~330 listings) and filters by city locally. No detail fetches
+either; one cycle is one HTTP request.
+
 Paid sources can be throttled independently with `min_interval_minutes`, so you
-can run the container hourly for Holland2Stay while only spending Firecrawl
-credits on the other two every few hours.
+can poll the free sources hourly while only spending Firecrawl credits on Funda
+and Huurwoningen every few hours.
 
 **The first run of each source is silent.** Everything currently listed is
 recorded as already-seen so you are not flooded with a hundred messages. Enabling
-a second source later only seeds that source.
+a source later only seeds that source. After that seed, **every** new listing is
+sent — there is no cap that quietly drops matches.
 
 ## Quick start
 
@@ -100,12 +108,11 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 ```json
 {
   "telegram": { "chat_id": -1001234567890, "topic_id": 184 },
-  "max_new_per_cycle": 25,
 
   "holland2stay": {
     "enabled": true,
     "cities": ["Utrecht", "Nijmegen", "Amersfoort"],
-    "max_lookups_per_cycle": 15
+    "max_lookups_per_cycle": 25
   },
 
   "funda": {
@@ -122,6 +129,11 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
     "searches": [
       { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "price": "1000-2000" }
     ]
+  },
+
+  "ikwilhuren": {
+    "enabled": true,
+    "cities": ["Amersfoort", "Nijkerk", "Leusden", "Utrecht"]
   }
 }
 ```
@@ -155,6 +167,12 @@ from huurwoningen.nl:
 
 Its default sort is already newest-first, so no sort parameter is needed.
 
+**ikwilhuren.nu** takes a plain `cities` list instead of searches, because the
+site returns its entire national catalogue in one request and the filtering
+happens here. Spell the city as the site does (`Amersfoort`, `Utrecht`,
+`Den Haag`); matching is case-insensitive. Leave `cities` out to be notified
+about every listing in the country.
+
 ### Finding your chat and topic IDs
 
 Open the target topic in Telegram Web and copy a message link — it looks like
@@ -172,15 +190,16 @@ group as an admin**, or it cannot post.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `max_new_per_cycle` | `25` | more new listings than this in one cycle are absorbed silently (guards against a site-wide relist spamming the group) |
-| `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle |
+| `holland2stay.cities` / `ikwilhuren.cities` | — | city names to notify about (case-insensitive) |
+| `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |
 | `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
 
 **On the interval and cost.** Each poll costs 1 Firecrawl credit per search page,
 so hourly ≈ 720 credits/month per source against a 1,000/month free plan. With
 two paid sources, hourly polling does not fit — set `min_interval_minutes: 120`
-on each (≈ 360/month each) and leave `RUN_INTERVAL` at an hour so Holland2Stay,
-which usually succeeds over free plain HTTP, keeps checking every cycle.
+on each (≈ 360/month each) and leave `RUN_INTERVAL` at an hour so the free
+sources (ikwilhuren.nu always, Holland2Stay whenever plain HTTP succeeds) keep
+checking every cycle.
 
 ## Operating
 
@@ -212,6 +231,7 @@ h2snotifier/
   h2s.py                  # Holland2Stay: sitemap + detail parsing
   funda.py                # Funda: search page parsing
   huurwoningen.py         # Huurwoningen: search page parsing
+  ikwilhuren.py           # ikwilhuren.nu: full catalogue over plain HTTP
   store.py                # SQLite: seen listings, street→city cache, run times
   telegram.py             # sendMessage with topic support
 .github/workflows/docker-publish.yml   # builds and pushes to GHCR
