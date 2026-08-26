@@ -16,13 +16,17 @@ Enable any combination.
 
 ```
 🏠 Botter 38
-📍 3863 ED Nijkerk  ·  Funda
+📍 3863 ED #Nijkerk  ·  Funda
 💶 €1.600
 📐 133 m²  ·  4 rooms  ·  Huis  ·  energy A
 [ 🔗 View on Funda ]
 ```
 
-Each message carries an inline button that opens the listing.
+Each message carries an inline button that opens the listing, and the town is
+sent as a hashtag — tap `#Nijkerk` to pull up every listing ever posted there.
+Names are squashed into a single tag (`Capelle aan den IJssel` → `#CapelleAanDenIJssel`,
+`Huis ter Heide (UT)` → `#HuisTerHeide`) because Telegram tags cannot contain
+spaces or punctuation.
 
 ## Why this fork exists
 

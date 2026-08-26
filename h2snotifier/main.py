@@ -9,8 +9,10 @@ After that seed every new listing is sent, however many turn up at once.
 import json
 import logging
 import os
+import re
 import sys
 import time
+import unicodedata
 from functools import partial
 
 import funda
@@ -43,12 +45,35 @@ def load_config():
         return json.load(handle)
 
 
+def city_tag(city):
+    """
+    Turn a city name into a Telegram hashtag you can tap to filter.
+
+    Telegram only accepts letters, digits and underscores in a tag, so
+    "Capelle aan den IJssel" has to become #CapelleAanDenIJssel. We upper
+    the first letter of each word rather than title-casing, which would
+    wreck the Dutch "IJ" digraph. Province suffixes like "(UT)" are
+    dropped so the same town always produces the same tag.
+    """
+    if not city:
+        return ""
+    plain = re.sub(r"\(.*?\)", " ", str(city))
+    plain = unicodedata.normalize("NFKD", plain)
+    plain = "".join(c for c in plain if not unicodedata.combining(c))
+    words = [w for w in re.split(r"[^0-9A-Za-z]+", plain) if w]
+    if not words:
+        return ""
+    return "#" + "".join(w[0].upper() + w[1:] for w in words)
+
+
 def listing_to_msg(listing):
     """Render one listing. Both sources produce the same field names."""
     label = SOURCE_LABEL.get(listing.get("source"), "")
     lines = [f"🏠 {listing.get('address') or listing['url_key']}"]
 
-    where = listing.get("city") or ""
+    # The city goes out as a hashtag so you can tap it to see every
+    # listing we ever sent for that town.
+    where = city_tag(listing.get("city"))
     if listing.get("postcode"):
         where = f"{listing['postcode']} {where}".strip()
     if where:
