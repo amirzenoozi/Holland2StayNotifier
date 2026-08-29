@@ -12,6 +12,8 @@ tapped a button someone else's panel left lying in the chat.
 """
 
 import logging
+import threading
+import time
 
 import registry
 import store
@@ -128,6 +130,68 @@ def status_text(config):
     return "\n".join(lines)
 
 
+class Replies:
+    """
+    Keeps at most one live bot reply of each kind, so the topic stays readable.
+
+    Chatter from commands is disposable: the answer to /status is worthless
+    the moment you ask again. Each new reply replaces the last one instead of
+    stacking up. The panel gets its own slot because a check report must not
+    swallow the buttons you just tapped.
+
+    House alerts never come through here - those are the point of the bot and
+    are meant to stay.
+    """
+
+    PANEL = "panel"
+    REPLY = "reply"
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.last = {}
+        self.lock = threading.Lock()
+
+    def send(self, chat_id, thread, text, keyboard=None, slot=REPLY):
+        slot_key = (chat_id, thread, slot)
+        with self.lock:
+            previous = self.last.pop(slot_key, None)
+            response = self.bot.send_simple_msg(
+                text, chat_id=chat_id, message_thread_id=thread, keyboard=keyboard
+            )
+            message_id = _message_id(response)
+            if message_id:
+                self.last[slot_key] = message_id
+            # Delete afterwards: if the send failed, the old reply is still
+            # better than nothing at all.
+            if previous and previous != message_id:
+                self.bot.delete_message(chat_id, previous)
+        return response
+
+    def remember(self, chat_id, thread, message_id, slot=PANEL):
+        """Adopt a message we did not send here, e.g. an edited panel."""
+        with self.lock:
+            self.last[(chat_id, thread, slot)] = message_id
+
+
+def _describe(update):
+    """One line saying what arrived and from whom, for the log."""
+    if "message" in update:
+        message = update["message"]
+        who = message.get("from", {}).get("id")
+        return f"message from {who}: {(message.get('text') or '')[:40]!r}"
+    if "callback_query" in update:
+        query = update["callback_query"]
+        return f"button {query.get('data')!r} from {query.get('from', {}).get('id')}"
+    return f"other: {sorted(k for k in update if k != 'update_id')}"
+
+
+def _message_id(response):
+    try:
+        return response.json()["result"]["message_id"]
+    except Exception:  # a failed send has nothing to remember
+        return None
+
+
 class Controller:
     """
     Long-polls Telegram and applies whatever the admin asks for.
@@ -136,10 +200,11 @@ class Controller:
     know how a scrape cycle works.
     """
 
-    def __init__(self, bot, config, run_now):
+    def __init__(self, bot, config, run_now, replies=None):
         self.bot = bot
         self.config = config
         self.run_now = run_now
+        self.replies = replies or Replies(bot)
         self.offset = None
 
     # -- plumbing ---------------------------------------------------------
@@ -166,8 +231,13 @@ class Controller:
         while stop is None or not stop.is_set():
             updates = self.bot.get_updates(offset=self.offset)
             if updates is None:  # network hiccup or a 409 from a second poller
-                if stop is not None and stop.wait(5):
-                    return
+                # Always pause. Retrying flat out would hammer the API and
+                # bury the reason in a wall of identical errors.
+                if stop is not None:
+                    if stop.wait(5):
+                        return
+                else:
+                    time.sleep(5)
                 continue
             for update in updates:
                 self.offset = update["update_id"] + 1
@@ -177,6 +247,9 @@ class Controller:
                     log.exception("failed to handle update")
 
     def handle(self, update):
+        # Logged so a silent bot can be told apart from one Telegram is not
+        # forwarding to - privacy mode hides plain group messages from bots.
+        log.info("update %s", _describe(update))
         if "message" in update:
             return self._handle_message(update["message"])
         if "callback_query" in update:
@@ -203,7 +276,11 @@ class Controller:
             return self._reply(chat_id, thread, HELP)
         if command in ("panel", "sources", "control"):
             return self._reply(
-                chat_id, thread, panel_text(self.config), panel_keyboard(self.config)
+                chat_id,
+                thread,
+                panel_text(self.config),
+                panel_keyboard(self.config),
+                slot=Replies.PANEL,
             )
         if command == "status":
             return self._reply(chat_id, thread, status_text(self.config))
@@ -214,14 +291,15 @@ class Controller:
             set_paused(False)
             return self._reply(chat_id, thread, "▶️ Alerts resumed.")
         if command in ("check", "run"):
+            # Acknowledge before starting. A quick cycle can finish and post
+            # its report first, and then the report would be the thing that
+            # gets replaced - leaving you staring at "checking now" forever.
+            self._reply(chat_id, thread, "⚡ Checking all sources now…")
             # Hand over where to answer: a check that finds nothing must still
             # say so, otherwise silence is indistinguishable from a dead bot.
-            started = self.run_now(reply_to=(chat_id, thread))
-            return self._reply(
-                chat_id,
-                thread,
-                "⚡ Checking all sources now…" if started else "⏳ A check is already running.",
-            )
+            if not self.run_now(reply_to=(chat_id, thread)):
+                return self._reply(chat_id, thread, "⏳ A check is already running.")
+            return None
         return self._reply(chat_id, thread, HELP)
 
     # -- buttons ----------------------------------------------------------
@@ -258,10 +336,13 @@ class Controller:
             self.bot.edit_text(
                 chat_id, message_id, panel_text(self.config), panel_keyboard(self.config)
             )
+            # The panel you are tapping is now the live one; a later /panel
+            # should clear this away rather than leave two sets of buttons.
+            self.replies.remember(
+                chat_id, message.get("message_thread_id"), message_id, Replies.PANEL
+            )
 
     # -- helpers ----------------------------------------------------------
 
-    def _reply(self, chat_id, thread, text, keyboard=None):
-        return self.bot.send_simple_msg(
-            text, chat_id=chat_id, message_thread_id=thread, keyboard=keyboard
-        )
+    def _reply(self, chat_id, thread, text, keyboard=None, slot=Replies.REPLY):
+        return self.replies.send(chat_id, thread, text, keyboard, slot)

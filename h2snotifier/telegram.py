@@ -23,6 +23,8 @@ BENIGN = (
     "query id is invalid",
     "message is not modified",
     "message to edit not found",
+    "message to delete not found",
+    "message can't be deleted",
 )
 
 
@@ -85,6 +87,12 @@ class TelegramBot:
             payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
 
         return self._post("sendMessage", payload, retries=retries)
+
+    def delete_message(self, chat_id, message_id):
+        """Remove one of our own messages so replies do not pile up."""
+        return self._post(
+            "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, retries=0
+        )
 
     def edit_keyboard(self, chat_id, message_id, keyboard):
         """Redraw a control panel in place, so toggling does not spam the chat."""

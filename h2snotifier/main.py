@@ -374,11 +374,14 @@ class Scheduler:
     run under a lock and /check simply declines when the lock is taken.
     """
 
-    def __init__(self, config, notifier, debug, interval):
+    def __init__(self, config, notifier, debug, interval, replies=None):
         self.config = config
         self.notifier = notifier
         self.debug = debug
         self.interval = interval
+        # Shared with the control panel so a check report replaces the
+        # "checking now" line instead of stacking another message on it.
+        self.replies = replies or control.Replies(notifier)
         self.lock = threading.Lock()
         self.wakeup = threading.Event()
         self.stop = threading.Event()
@@ -411,7 +414,7 @@ class Scheduler:
 
     def _report(self, reply_to, text):
         chat_id, thread = reply_to
-        self.notifier.send_simple_msg(text, chat_id=chat_id, message_thread_id=thread)
+        self.replies.send(chat_id, thread, text)
 
     def request_cycle(self, reply_to=None):
         """Ask for a cycle now; used by /check. False means one is running."""
@@ -453,7 +456,8 @@ def main():
 
     store.init()
     interval = int(os.environ.get("RUN_INTERVAL", 3600))
-    scheduler = Scheduler(config, notifier, debug, interval)
+    replies = control.Replies(notifier)
+    scheduler = Scheduler(config, notifier, debug, interval, replies)
 
     # One-shot mode keeps `docker exec ... python main.py` working for a
     # manual check. It must not poll: two pollers on one token fight, and
@@ -465,7 +469,7 @@ def main():
     if not control.admin_ids(config):
         log.warning("no telegram.admin_ids in config - the control panel will refuse everyone")
 
-    controller = control.Controller(notifier, config, scheduler.request_cycle)
+    controller = control.Controller(notifier, config, scheduler.request_cycle, replies)
     listener = threading.Thread(target=controller.listen_forever, daemon=True)
     listener.start()
 
