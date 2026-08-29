@@ -144,8 +144,24 @@ class Controller:
 
     # -- plumbing ---------------------------------------------------------
 
+    def _discard_backlog(self):
+        """
+        Drop taps and commands that queued up while we were down.
+
+        Telegram holds updates for 24 hours. Replaying them on start-up would
+        apply yesterday's button taps invisibly: those callbacks are far too
+        old to answer, so you would get no confirmation that anything moved.
+        """
+        while True:
+            updates = self.bot.get_updates(offset=self.offset, timeout=0)
+            if not updates:
+                return
+            self.offset = updates[-1]["update_id"] + 1
+            log.info("discarded %d update(s) queued while offline", len(updates))
+
     def listen_forever(self, stop=None):
         self.bot.set_commands(COMMANDS)
+        self._discard_backlog()
         log.info("listening for commands")
         while stop is None or not stop.is_set():
             updates = self.bot.get_updates(offset=self.offset)

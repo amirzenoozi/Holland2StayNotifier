@@ -15,6 +15,16 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Telegram rejections that mean "nothing to do here", not "something broke":
+# a button tapped before we were listening, or a panel redrawn to what it
+# already said. Logging these as errors would cry wolf.
+BENIGN = (
+    "query is too old",
+    "query id is invalid",
+    "message is not modified",
+    "message to edit not found",
+)
+
 
 class TelegramBot:
     def __init__(self, apikey, chat_id, message_thread_id=None):
@@ -43,9 +53,11 @@ class TelegramBot:
                 time.sleep(wait + 1)
                 continue
 
-            log.error(
-                "telegram %s failed: %s %s", method, response.status_code, response.text[:200]
-            )
+            body = response.text[:300]
+            if any(phrase in body.lower() for phrase in BENIGN):
+                log.info("telegram %s ignored: %s", method, body)
+            else:
+                log.error("telegram %s failed: %s %s", method, response.status_code, body)
             return response
         return response
 
