@@ -11,10 +11,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY fetcher.py h2s.py funda.py huurwoningen.py ikwilhuren.py store.py telegram.py main.py ./
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && mkdir -p /data
+COPY fetcher.py h2s.py funda.py huurwoningen.py ikwilhuren.py \
+     registry.py control.py store.py telegram.py main.py ./
+RUN mkdir -p /data
 
 VOLUME ["/data"]
 
-CMD ["/entrypoint.sh"]
+# main.py owns both loops now - the scrape timer and the Telegram listener -
+# so there is no shell wrapper to sleep between runs.
+CMD ["python", "main.py"]

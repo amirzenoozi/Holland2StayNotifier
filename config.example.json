@@ -1,7 +1,8 @@
 {
   "telegram": {
     "chat_id": -1001234567890,
-    "topic_id": 184
+    "topic_id": 184,
+    "admin_ids": [61462805]
   },
 
   "holland2stay": {

@@ -111,7 +111,11 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
 ```json
 {
-  "telegram": { "chat_id": -1001234567890, "topic_id": 184 },
+  "telegram": {
+    "chat_id": -1001234567890,
+    "topic_id": 184,
+    "admin_ids": [61462805]
+  },
 
   "holland2stay": {
     "enabled": true,
@@ -184,6 +188,49 @@ Open the target topic in Telegram Web and copy a message link — it looks like
 (`-1001900208566`) and `topic_id` is the second (`184`). **Add the bot to the
 group as an admin**, or it cannot post.
 
+## Controlling the bot from Telegram
+
+The bot listens for commands and button taps, so you can steer it without
+touching the server.
+
+| Command | What it does |
+| --- | --- |
+| `/panel` | the control panel — buttons to pause and to pick sources |
+| `/status` | what is on, how much is tracked, when each source last ran |
+| `/pause` | stop all alerts |
+| `/resume` | start them again |
+| `/check` | run a check right now instead of waiting for the hour |
+| `/help` | list the commands |
+
+The panel draws one button per source, marked ✅ when it is on and 🚫 when it is
+off, plus pause/resume and a check-now button. Tapping redraws the panel in
+place rather than posting a new message.
+
+```
+🎛 Notifier control
+
+▶️ Alerts are running
+Listening to: Holland2Stay, Huurwoningen, ikwilhuren.nu
+
+[✅ Holland2Stay]
+[🚫 Funda]
+[✅ Huurwoningen]
+[✅ ikwilhuren.nu]
+[⏸ Pause alerts]
+[⚡ Check now]  [🔄 Refresh]
+```
+
+These switches live in the database, not in `config.json`, so they survive
+restarts and image updates. `config.json` decides which sources *exist*; the
+panel decides which are listening right now. A source turned off in the file
+cannot be turned on from Telegram — it may have no search terms to run.
+
+Only the Telegram user ids in `telegram.admin_ids` can change anything.
+Everyone else — typing a command or tapping a button on a panel someone left in
+the chat — gets `⛔ You do not have access to this feature, call AmirKhan!`. To
+find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
+`message.from.id`.
+
 ## Configuration reference
 
 | Variable | Default | Meaning |
@@ -191,9 +238,11 @@ group as an admin**, or it cannot post.
 | `RUN_INTERVAL` | `3600` | seconds between polls |
 | `CONFIG_PATH` | `/app/config.json` | config location in the container |
 | `DB_PATH` | `/data/listings.db` | SQLite state (persisted in a volume) |
+| `RUN_ONCE` | unset | set to `1` to run a single cycle and exit, instead of looping and listening |
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
+| `telegram.admin_ids` | `[]` | user ids allowed to use the commands and buttons; empty means nobody |
 | `holland2stay.cities` / `ikwilhuren.cities` | — | city names to notify about (case-insensitive) |
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |
 | `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
@@ -216,7 +265,18 @@ docker compose restart      # apply config.json changes
 ```
 
 State lives in the `h2s_data` volume. Deleting it makes the next run re-seed
-silently — it will not re-notify you about everything.
+silently — it will not re-notify you about everything. That volume also holds
+the pause and per-source switches, so they survive `down`/`up` and image
+updates.
+
+To force a check by hand, use `/check` in Telegram, or:
+
+```bash
+docker exec -e RUN_ONCE=1 h2snotifier python main.py
+```
+
+`RUN_ONCE=1` matters: without it the command starts a second Telegram poller
+alongside the container's, and Telegram rejects whichever one loses with a 409.
 
 ## Building locally
 
@@ -230,14 +290,16 @@ docker-compose.yml        # what you run
 .env.example
 config.example.json
 h2snotifier/
-  main.py                 # orchestrates a cycle over enabled sources
+  main.py                 # scrape loop + cycle over enabled sources
+  control.py              # Telegram commands and the control panel
+  registry.py             # the list of sources, in one place
   fetcher.py              # shared plain-HTTP + Firecrawl fetch layer
   h2s.py                  # Holland2Stay: sitemap + detail parsing
   funda.py                # Funda: search page parsing
   huurwoningen.py         # Huurwoningen: search page parsing
   ikwilhuren.py           # ikwilhuren.nu: full catalogue over plain HTTP
   store.py                # SQLite: seen listings, street→city cache, run times
-  telegram.py             # sendMessage with topic support
+  telegram.py             # send, edit, long-poll; topics and inline buttons
 .github/workflows/docker-publish.yml   # builds and pushes to GHCR
 ```
 

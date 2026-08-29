@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS runs (
     source  TEXT PRIMARY KEY,
     ran_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -65,6 +70,28 @@ def init():
             )
 
 
+def get_setting(key, default=None):
+    """
+    Read a runtime switch set from Telegram.
+
+    Settings outrank config.json: the file says how the notifier starts,
+    the buttons say how it is running right now.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    with _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, str(value), _now()),
+        )
+
+
 def known_keys(source=None):
     """Every url_key we have recorded, optionally for one source only."""
     with _connect() as connection:
@@ -95,6 +122,15 @@ def record_many(url_keys, city=None, notified=False, source="h2s"):
     rows = [(key, city, 1 if notified else 0, stamp, source) for key in url_keys]
     with _connect() as connection:
         connection.executemany(INSERT_SQL, rows)
+
+
+def counts_by_source():
+    """How many listings we are tracking per source, for the status report."""
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT source, COUNT(*) FROM listings GROUP BY source"
+        ).fetchall()
+    return dict(rows)
 
 
 def street_city(prefix):

@@ -11,14 +11,17 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
 from functools import partial
 
+import control
 import funda
 import h2s
 import huurwoningen
 import ikwilhuren
+import registry
 import store
 from fetcher import FetchError, SiteUnavailable
 from telegram import TelegramBot
@@ -32,12 +35,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-SOURCE_LABEL = {
-    "h2s": "Holland2Stay",
-    "funda": "Funda",
-    "huurwoningen": "Huurwoningen",
-    "ikwilhuren": "ikwilhuren.nu",
-}
+SOURCE_LABEL = registry.LABELS
 
 
 def load_config():
@@ -283,7 +281,9 @@ def run_cycle(config, notifier, debug):
     )
     for name, runner in runners:
         source_config = config.get(name, {})
-        if not source_config.get("enabled", False):
+        # config.json decides what exists; the control panel decides what
+        # is listening right now.
+        if not control.source_enabled(name, config):
             continue
 
         # Every fetch of a paid source costs a Firecrawl credit, so a source
@@ -309,6 +309,56 @@ def run_cycle(config, notifier, debug):
         debug.send_simple_msg("Notifier errors:\n" + "\n".join(failures))
 
 
+class Scheduler:
+    """
+    Owns the scrape loop and makes sure only one cycle runs at a time.
+
+    The timer and the /check button both want to start a cycle, and the
+    control panel must stay responsive while one is in flight - so cycles
+    run under a lock and /check simply declines when the lock is taken.
+    """
+
+    def __init__(self, config, notifier, debug, interval):
+        self.config = config
+        self.notifier = notifier
+        self.debug = debug
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.wakeup = threading.Event()
+        self.stop = threading.Event()
+
+    def cycle(self):
+        """Run one cycle if none is running. Returns False if one already is."""
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            if control.is_paused():
+                log.info("paused, skipping cycle")
+                return True
+            run_cycle(self.config, self.notifier, self.debug)
+        except Exception as exc:
+            log.exception("cycle failed")
+            if self.debug:
+                self.debug.send_simple_msg(f"Notifier error: {type(exc).__name__}: {exc}")
+        finally:
+            self.lock.release()
+        return True
+
+    def request_cycle(self):
+        """Ask for a cycle now; used by /check. False means one is running."""
+        if self.lock.locked():
+            return False
+        self.wakeup.set()
+        return True
+
+    def loop_forever(self):
+        while not self.stop.is_set():
+            self.cycle()
+            # wakeup lets /check cut the wait short without a second timer.
+            self.wakeup.wait(self.interval)
+            self.wakeup.clear()
+
+
 def main():
     try:
         config = load_config()
@@ -331,13 +381,26 @@ def main():
     debug_chat = os.environ.get("DEBUGGING_CHAT_ID")
     debug = TelegramBot(apikey, chat_id=debug_chat) if debug_chat else None
 
-    try:
-        run_cycle(config, notifier, debug)
-    except Exception as exc:
-        log.exception("cycle failed")
-        if debug:
-            debug.send_simple_msg(f"Notifier error: {type(exc).__name__}: {exc}")
-        return 1
+    store.init()
+    interval = int(os.environ.get("RUN_INTERVAL", 3600))
+    scheduler = Scheduler(config, notifier, debug, interval)
+
+    # One-shot mode keeps `docker exec ... python main.py` working for a
+    # manual check. It must not poll: two pollers on one token fight, and
+    # Telegram answers the loser with 409.
+    if os.environ.get("RUN_ONCE") == "1":
+        scheduler.cycle()
+        return 0
+
+    if not control.admin_ids(config):
+        log.warning("no telegram.admin_ids in config - the control panel will refuse everyone")
+
+    controller = control.Controller(notifier, config, scheduler.request_cycle)
+    listener = threading.Thread(target=controller.listen_forever, daemon=True)
+    listener.start()
+
+    log.info("notifier started, checking every %ss", interval)
+    scheduler.loop_forever()
     return 0
 
 
