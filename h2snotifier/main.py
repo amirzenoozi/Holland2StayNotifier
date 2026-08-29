@@ -158,10 +158,12 @@ def run_h2s(config, notifier, debug):
     log.info("h2s: %d listings, %d new", len(current), len(new_keys))
 
     if not known:
-        return _seed(h2s.NAME, current, debug)
+        _seed(h2s.NAME, current, debug)
+        return {"seen": len(current), "new": 0, "sent": 0, "note": "seeded"}
     if not new_keys:
-        return
+        return {"seen": len(current), "new": 0, "sent": 0}
 
+    sent = 0
     lookups = 0
     for url_key in new_keys:
         prefix = h2s.street_prefix(url_key)
@@ -195,10 +197,13 @@ def run_h2s(config, notifier, debug):
 
         if city and city.lower() in targets:
             ok = _notify(listing, notifier, city)
+            sent += bool(ok)
             store.record(url_key, city=city, notified=ok, source=h2s.NAME)
         else:
             log.info("h2s: skipping %s (%s) - not a watched city", url_key, city)
             store.record(url_key, city=city, notified=True, source=h2s.NAME)
+
+    return {"seen": len(current), "new": len(new_keys), "sent": sent}
 
 
 def run_search_source(module, config, notifier, debug):
@@ -210,33 +215,41 @@ def run_search_source(module, config, notifier, debug):
     searches = config.get("searches", [])
     if not searches:
         log.warning("%s: enabled but no searches configured", name)
-        return
+        return {"seen": 0, "new": 0, "sent": 0, "note": "no searches configured"}
 
     known = store.known_keys(source=name)
     found = {}
+    failed = 0
     for search in searches:
         try:
             found.update(module.fetch_search(search))
         except FetchError as exc:
+            failed += 1
             log.error("%s: search %r failed: %s", name, search.get("name"), exc)
 
     if not found:
-        return
+        return {"seen": 0, "new": 0, "sent": 0, "note": "no results"}
 
     new_keys = sorted(set(found) - known)
     log.info("%s: %d listings, %d new", name, len(found), len(new_keys))
 
+    note = f"{failed} search(es) failed" if failed else None
     if not known:
-        return _seed(name, set(found), debug)
+        _seed(name, set(found), debug)
+        return {"seen": len(found), "new": 0, "sent": 0, "note": "seeded"}
     if not new_keys:
-        return
+        return {"seen": len(found), "new": 0, "sent": 0, "note": note}
 
     # Everything new goes out, however many there are. _notify paces the sends
     # and telegram.py backs off when Telegram asks it to.
+    sent = 0
     for url_key in new_keys:
         listing = found[url_key]
         ok = _notify(listing, notifier)
+        sent += bool(ok)
         store.record(url_key, city=listing.get("city"), notified=ok, source=name)
+
+    return {"seen": len(found), "new": len(new_keys), "sent": sent, "note": note}
 
 
 def run_ikwilhuren(config, notifier, debug):
@@ -255,10 +268,12 @@ def run_ikwilhuren(config, notifier, debug):
     log.info("%s: %d listings, %d new", name, len(found), len(new_keys))
 
     if not known:
-        return _seed(name, set(found), debug)
+        _seed(name, set(found), debug)
+        return {"seen": len(found), "new": 0, "sent": 0, "note": "seeded"}
     if not new_keys:
-        return
+        return {"seen": len(found), "new": 0, "sent": 0}
 
+    sent = 0
     for url_key in new_keys:
         listing = found[url_key]
         city = listing.get("city") or ""
@@ -266,12 +281,23 @@ def run_ikwilhuren(config, notifier, debug):
             store.record(url_key, city=city, notified=True, source=name)
             continue
         ok = _notify(listing, notifier, city)
+        sent += bool(ok)
         store.record(url_key, city=city, notified=ok, source=name)
 
+    return {"seen": len(found), "new": len(new_keys), "sent": sent}
 
-def run_cycle(config, notifier, debug):
+
+def run_cycle(config, notifier, debug, force=False):
+    """
+    Poll every enabled source once and return what each one did.
+
+    `force` is what /check sets: when you ask for a check by hand you mean
+    all of them, so the per-source interval that exists to save credits is
+    stood down for that one run.
+    """
     store.init()
     failures = []
+    results = {}
 
     runners = (
         ("holland2stay", run_h2s),
@@ -284,29 +310,59 @@ def run_cycle(config, notifier, debug):
         # config.json decides what exists; the control panel decides what
         # is listening right now.
         if not control.source_enabled(name, config):
+            results[name] = {"skipped": "off"}
             continue
 
         # Every fetch of a paid source costs a Firecrawl credit, so a source
         # may ask to be polled less often than the container's own loop.
         wait = source_config.get("min_interval_minutes")
         elapsed = store.minutes_since_run(name) if wait else None
-        if wait and elapsed is not None and elapsed < wait:
+        if not force and wait and elapsed is not None and elapsed < wait:
             log.info("%s: last run %.0f min ago, waiting for %d", name, elapsed, wait)
+            results[name] = {"skipped": f"waiting {wait - int(elapsed)} min"}
             continue
 
         try:
             store.mark_run(name)
-            runner(source_config, notifier, debug)
+            results[name] = runner(source_config, notifier, debug) or {}
         except SiteUnavailable as exc:
             # Maintenance windows and 5xx blips clear on their own; there is
             # nothing to act on, so stay quiet and try again next cycle.
             log.warning("%s: source unavailable, skipping this cycle (%s)", name, exc)
+            results[name] = {"skipped": "site unavailable"}
         except Exception as exc:  # one bad source must not stop the other
             log.exception("%s: cycle failed", name)
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
+            results[name] = {"error": type(exc).__name__}
 
     if failures and debug:
         debug.send_simple_msg("Notifier errors:\n" + "\n".join(failures))
+    return results
+
+
+def summarise(results):
+    """Turn a cycle's results into the reply /check sends back."""
+    lines = ["✅ Check finished"]
+    total = 0
+    for name, result in results.items():
+        label = registry.label(name)
+        if "error" in result:
+            lines.append(f"⚠️ {label}: {result['error']}")
+        elif "skipped" in result:
+            lines.append(f"⏭ {label}: {result['skipped']}")
+        else:
+            sent = result.get("sent", 0)
+            total += sent
+            detail = f"{result.get('seen', 0)} listings, {result.get('new', 0)} new"
+            if sent:
+                detail += f", {sent} sent"
+            if result.get("note"):
+                detail += f" ({result['note']})"
+            lines.append(f"{'📬' if sent else '•'} {label}: {detail}")
+
+    if not total:
+        lines.append("\nNothing new to send.")
+    return "\n".join(lines)
 
 
 class Scheduler:
@@ -326,28 +382,42 @@ class Scheduler:
         self.lock = threading.Lock()
         self.wakeup = threading.Event()
         self.stop = threading.Event()
+        # Where to report back to, set by /check and cleared once answered.
+        self.reply_to = None
 
-    def cycle(self):
+    def cycle(self, force=False):
         """Run one cycle if none is running. Returns False if one already is."""
         if not self.lock.acquire(blocking=False):
             return False
+        reply_to, self.reply_to = self.reply_to, None
         try:
             if control.is_paused():
                 log.info("paused, skipping cycle")
+                if reply_to:
+                    self._report(reply_to, "⏸ Alerts are paused - nothing was checked.")
                 return True
-            run_cycle(self.config, self.notifier, self.debug)
+            results = run_cycle(self.config, self.notifier, self.debug, force=force or bool(reply_to))
+            if reply_to:
+                self._report(reply_to, summarise(results))
         except Exception as exc:
             log.exception("cycle failed")
+            if reply_to:
+                self._report(reply_to, f"⚠️ Check failed: {type(exc).__name__}: {exc}")
             if self.debug:
                 self.debug.send_simple_msg(f"Notifier error: {type(exc).__name__}: {exc}")
         finally:
             self.lock.release()
         return True
 
-    def request_cycle(self):
+    def _report(self, reply_to, text):
+        chat_id, thread = reply_to
+        self.notifier.send_simple_msg(text, chat_id=chat_id, message_thread_id=thread)
+
+    def request_cycle(self, reply_to=None):
         """Ask for a cycle now; used by /check. False means one is running."""
         if self.lock.locked():
             return False
+        self.reply_to = reply_to
         self.wakeup.set()
         return True
 

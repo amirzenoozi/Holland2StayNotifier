@@ -214,11 +214,13 @@ class Controller:
             set_paused(False)
             return self._reply(chat_id, thread, "▶️ Alerts resumed.")
         if command in ("check", "run"):
-            started = self.run_now()
+            # Hand over where to answer: a check that finds nothing must still
+            # say so, otherwise silence is indistinguishable from a dead bot.
+            started = self.run_now(reply_to=(chat_id, thread))
             return self._reply(
                 chat_id,
                 thread,
-                "⚡ Checking now…" if started else "⏳ A check is already running.",
+                "⚡ Checking all sources now…" if started else "⏳ A check is already running.",
             )
         return self._reply(chat_id, thread, HELP)
 
@@ -248,7 +250,8 @@ class Controller:
             set_paused(False)
             note = "Alerts resumed"
         elif data == "check":
-            note = "Checking now…" if self.run_now() else "Already running"
+            reply_to = (chat_id, message.get("message_thread_id"))
+            note = "Checking now…" if self.run_now(reply_to=reply_to) else "Already running"
 
         self.bot.answer_callback(query["id"], note)
         if chat_id and message_id:
