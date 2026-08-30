@@ -206,6 +206,11 @@ The panel draws one button per source, marked ✅ when it is on and 🚫 when it
 off, plus pause/resume and a check-now button. Tapping redraws the panel in
 place rather than posting a new message.
 
+A command that speaks twice replaces its own message rather than posting a
+second one — `/check` says "checking now" and then turns that same message
+into the report. The replacing stops there: the next command starts a new
+message and leaves the last one alone. House alerts are never replaced.
+
 ```
 🎛 Notifier control
 

@@ -385,7 +385,7 @@ class Scheduler:
         self.lock = threading.Lock()
         self.wakeup = threading.Event()
         self.stop = threading.Event()
-        # Where to report back to, set by /check and cleared once answered.
+        # The reply slot to report into, set by /check and cleared once used.
         self.reply_to = None
 
     def cycle(self, force=False):
@@ -397,24 +397,20 @@ class Scheduler:
             if control.is_paused():
                 log.info("paused, skipping cycle")
                 if reply_to:
-                    self._report(reply_to, "⏸ Alerts are paused - nothing was checked.")
+                    self.replies.send(reply_to, "⏸ Alerts are paused - nothing was checked.")
                 return True
             results = run_cycle(self.config, self.notifier, self.debug, force=force or bool(reply_to))
             if reply_to:
-                self._report(reply_to, summarise(results))
+                self.replies.send(reply_to, summarise(results))
         except Exception as exc:
             log.exception("cycle failed")
             if reply_to:
-                self._report(reply_to, f"⚠️ Check failed: {type(exc).__name__}: {exc}")
+                self.replies.send(reply_to, f"⚠️ Check failed: {type(exc).__name__}: {exc}")
             if self.debug:
                 self.debug.send_simple_msg(f"Notifier error: {type(exc).__name__}: {exc}")
         finally:
             self.lock.release()
         return True
-
-    def _report(self, reply_to, text):
-        chat_id, thread = reply_to
-        self.replies.send(chat_id, thread, text)
 
     def request_cycle(self, reply_to=None):
         """Ask for a cycle now; used by /check. False means one is running."""

@@ -11,9 +11,11 @@ anything; everyone else gets turned away, whether they typed a command or
 tapped a button someone else's panel left lying in the chat.
 """
 
+import itertools
 import logging
 import threading
 import time
+from collections import OrderedDict
 
 import registry
 import store
@@ -132,45 +134,52 @@ def status_text(config):
 
 class Replies:
     """
-    Keeps at most one live bot reply of each kind, so the topic stays readable.
+    One command, one message.
 
-    Chatter from commands is disposable: the answer to /status is worthless
-    the moment you ask again. Each new reply replaces the last one instead of
-    stacking up. The panel gets its own slot because a check report must not
-    swallow the buttons you just tapped.
+    A command that speaks twice replaces its own first message rather than
+    posting a second: /check says "checking now" and then turns that very
+    message into the report. The replacing stops at the command boundary -
+    each new command opens a fresh slot, so asking for the panel leaves the
+    report from your last check exactly where it is.
 
     House alerts never come through here - those are the point of the bot and
     are meant to stay.
     """
 
-    PANEL = "panel"
-    REPLY = "reply"
+    # How many slots stay replaceable. Older ones are forgotten, which only
+    # means a very late report posts a new message instead of replacing one.
+    KEEP = 32
 
     def __init__(self, bot):
         self.bot = bot
-        self.last = {}
+        self.slots = OrderedDict()
+        self.counter = itertools.count(1)
         self.lock = threading.Lock()
 
-    def send(self, chat_id, thread, text, keyboard=None, slot=REPLY):
-        slot_key = (chat_id, thread, slot)
+    def open(self, chat_id, thread):
+        """Start a slot for one command and hand back somewhere to reply."""
         with self.lock:
-            previous = self.last.pop(slot_key, None)
+            token = next(self.counter)
+            self.slots[token] = None
+            while len(self.slots) > self.KEEP:
+                self.slots.popitem(last=False)
+        return (token, chat_id, thread)
+
+    def send(self, slot, text, keyboard=None):
+        token, chat_id, thread = slot
+        with self.lock:
+            previous = self.slots.get(token)
             response = self.bot.send_simple_msg(
                 text, chat_id=chat_id, message_thread_id=thread, keyboard=keyboard
             )
             message_id = _message_id(response)
-            if message_id:
-                self.last[slot_key] = message_id
+            if token in self.slots:
+                self.slots[token] = message_id
             # Delete afterwards: if the send failed, the old reply is still
             # better than nothing at all.
             if previous and previous != message_id:
                 self.bot.delete_message(chat_id, previous)
         return response
-
-    def remember(self, chat_id, thread, message_id, slot=PANEL):
-        """Adopt a message we did not send here, e.g. an edited panel."""
-        with self.lock:
-            self.last[(chat_id, thread, slot)] = message_id
 
 
 def _describe(update):
@@ -268,39 +277,40 @@ class Controller:
         thread = message.get("message_thread_id")
         user_id = message.get("from", {}).get("id")
 
+        # This command gets its own slot. Anything it says later replaces what
+        # it said before, and nothing it does touches an earlier command.
+        slot = self.replies.open(chat_id, thread)
+
         if not is_admin(user_id, self.config):
             log.warning("denied /%s from %s", command, user_id)
-            return self._reply(chat_id, thread, DENIED)
+            return self.replies.send(slot, DENIED)
 
         if command in ("start", "help"):
-            return self._reply(chat_id, thread, HELP)
+            return self.replies.send(slot, HELP)
         if command in ("panel", "sources", "control"):
-            return self._reply(
-                chat_id,
-                thread,
-                panel_text(self.config),
-                panel_keyboard(self.config),
-                slot=Replies.PANEL,
+            return self.replies.send(
+                slot, panel_text(self.config), panel_keyboard(self.config)
             )
         if command == "status":
-            return self._reply(chat_id, thread, status_text(self.config))
+            return self.replies.send(slot, status_text(self.config))
         if command == "pause":
             set_paused(True)
-            return self._reply(chat_id, thread, "⏸ Alerts paused. Nothing will be sent.")
+            return self.replies.send(slot, "⏸ Alerts paused. Nothing will be sent.")
         if command in ("resume", "start_alerts"):
             set_paused(False)
-            return self._reply(chat_id, thread, "▶️ Alerts resumed.")
+            return self.replies.send(slot, "▶️ Alerts resumed.")
         if command in ("check", "run"):
             # Acknowledge before starting. A quick cycle can finish and post
             # its report first, and then the report would be the thing that
             # gets replaced - leaving you staring at "checking now" forever.
-            self._reply(chat_id, thread, "⚡ Checking all sources now…")
-            # Hand over where to answer: a check that finds nothing must still
-            # say so, otherwise silence is indistinguishable from a dead bot.
-            if not self.run_now(reply_to=(chat_id, thread)):
-                return self._reply(chat_id, thread, "⏳ A check is already running.")
+            self.replies.send(slot, "⚡ Checking all sources now…")
+            # Hand the slot over so the report lands on top of that "checking
+            # now" rather than beside it. A check that finds nothing must
+            # still say so: silence is indistinguishable from a dead bot.
+            if not self.run_now(reply_to=slot):
+                return self.replies.send(slot, "⏳ A check is already running.")
             return None
-        return self._reply(chat_id, thread, HELP)
+        return self.replies.send(slot, HELP)
 
     # -- buttons ----------------------------------------------------------
 
@@ -328,21 +338,15 @@ class Controller:
             set_paused(False)
             note = "Alerts resumed"
         elif data == "check":
-            reply_to = (chat_id, message.get("message_thread_id"))
-            note = "Checking now…" if self.run_now(reply_to=reply_to) else "Already running"
+            # A tap is its own command, so the report gets a fresh slot and
+            # will not swallow the panel that is sitting right above it.
+            slot = self.replies.open(chat_id, message.get("message_thread_id"))
+            note = "Checking now…" if self.run_now(reply_to=slot) else "Already running"
 
         self.bot.answer_callback(query["id"], note)
         if chat_id and message_id:
+            # The panel is edited where it stands, so it stays put no matter
+            # what else the bot says afterwards.
             self.bot.edit_text(
                 chat_id, message_id, panel_text(self.config), panel_keyboard(self.config)
             )
-            # The panel you are tapping is now the live one; a later /panel
-            # should clear this away rather than leave two sets of buttons.
-            self.replies.remember(
-                chat_id, message.get("message_thread_id"), message_id, Replies.PANEL
-            )
-
-    # -- helpers ----------------------------------------------------------
-
-    def _reply(self, chat_id, thread, text, keyboard=None, slot=Replies.REPLY):
-        return self.replies.send(chat_id, thread, text, keyboard, slot)
