@@ -2,7 +2,8 @@
   "telegram": {
     "chat_id": -1001234567890,
     "topic_id": 184,
-    "admin_ids": [61462805]
+    "admin_ids": [61462805],
+    "timezone": "Europe/Amsterdam"
   },
 
   "holland2stay": {

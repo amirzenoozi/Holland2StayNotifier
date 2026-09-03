@@ -203,6 +203,29 @@ def minutes_since_run(source):
     return (datetime.now(timezone.utc) - previous).total_seconds() / 60
 
 
+def last_run(source):
+    """
+    When a source last polled, as an aware UTC datetime, or None.
+
+    minutes_since_run answers "is it due yet". This answers "when was it",
+    which is the one you can show someone on their own clock.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT ran_at FROM runs WHERE source = ?", (source,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        moment = datetime.fromisoformat(row[0])
+    except ValueError:
+        return None
+    # Rows written before we settled on aware timestamps carry no offset.
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
 def mark_run(source):
     with _connect() as connection:
         connection.execute(

@@ -1,1 +1,4 @@
 requests==2.32.3
+# Zone names for /timezone. The base image ships tzdata today, but if that
+# ever changes every time would quietly turn into UTC.
+tzdata==2025.2

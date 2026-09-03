@@ -114,7 +114,8 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
   "telegram": {
     "chat_id": -1001234567890,
     "topic_id": 184,
-    "admin_ids": [61462805]
+    "admin_ids": [61462805],
+    "timezone": "Europe/Amsterdam"
   },
 
   "holland2stay": {
@@ -219,11 +220,13 @@ touching the server.
 | `/pause` | stop all alerts |
 | `/resume` | start them again |
 | `/check` | run a check right now instead of waiting for the hour |
+| `/last` | when each source was last checked, and when it is next due |
+| `/timezone` | show the clock times are printed in, or set it: `/timezone Europe/Amsterdam` |
 | `/help` | list the commands |
 
 The panel draws one button per source, marked ✅ when it is on and 🚫 when it is
-off, plus pause/resume and a check-now button. Tapping redraws the panel in
-place rather than posting a new message.
+off, plus pause/resume, check-now and last-checks buttons. Tapping redraws the
+panel in place rather than posting a new message.
 
 A command that speaks twice replaces its own message rather than posting a
 second one — `/check` says "checking now" and then turns that same message
@@ -241,8 +244,26 @@ Listening to: Holland2Stay, Huurwoningen, ikwilhuren.nu
 [✅ Huurwoningen]
 [✅ ikwilhuren.nu]
 [⏸ Pause alerts]
-[⚡ Check now]  [🔄 Refresh]
+[⚡ Check now]  [🕒 Last checks]
+[🔄 Refresh]
 ```
+
+`/last` answers on your clock, not the server's:
+
+```
+🕒 Last checked  (Europe/Amsterdam)
+
+✅ Holland2Stay — Thu 03 Sep, 15:45  (25 min ago)
+     next due 16:45
+✅ Funda — Thu 03 Sep, 13:00  (3h 10m ago)
+✅ ikwilhuren.nu — Thu 03 Sep, 16:10  (just now)
+```
+
+Telegram does not tell a bot where you are — an update carries your id, name
+and language, but no timezone — so the clock is a setting rather than
+something the bot can work out. It defaults to `Europe/Amsterdam`; set another
+with `/timezone Asia/Tehran`, and it is remembered in the database. A name it
+does not recognise comes back with suggestions.
 
 These switches live in the database, not in `config.json`, so they survive
 restarts and image updates. `config.json` decides which sources *exist*; the
@@ -267,6 +288,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `telegram.admin_ids` | `[]` | user ids allowed to use the commands and buttons; empty means nobody |
+| `telegram.timezone` | `Europe/Amsterdam` | clock used for times in `/last`; `/timezone` overrides it and wins |
 | `holland2stay.cities` / `ikwilhuren.cities` | — | city names to notify about (case-insensitive) |
 | `ikwilhuren.areas` | — | circles on the map: `{"place": "Nijkerk", "radius_km": 40}`. A listing matches if it falls in any circle **or** the city list |
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |

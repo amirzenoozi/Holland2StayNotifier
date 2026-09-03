@@ -16,6 +16,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone as utc_timezone
+from zoneinfo import ZoneInfo, available_timezones
 
 import registry
 import store
@@ -26,10 +28,17 @@ DENIED = "⛔ You do not have access to this feature, call AmirKhan!"
 
 PAUSED_KEY = "paused"
 SOURCE_KEY = "source:{}"
+TIMEZONE_KEY = "timezone"
+
+# Telegram never tells us where you are - see timezone_name() - so we start
+# from the clock the houses are in and let you say otherwise.
+DEFAULT_TIMEZONE = "Europe/Amsterdam"
 
 COMMANDS = (
     ("panel", "Open the control panel"),
     ("status", "What the notifier is doing"),
+    ("last", "When each source was last checked"),
+    ("timezone", "Show or set the clock used for times"),
     ("pause", "Stop all alerts"),
     ("resume", "Start alerts again"),
     ("check", "Run a check right now"),
@@ -40,6 +49,8 @@ HELP = (
     "🎛 Rental notifier\n\n"
     "/panel - buttons to pause and pick sources\n"
     "/status - what is on and how much is tracked\n"
+    "/last - when each source was last checked\n"
+    "/timezone - show the clock, or /timezone Europe/Amsterdam to change it\n"
     "/pause - stop all alerts\n"
     "/resume - start alerts again\n"
     "/check - run a check right now\n"
@@ -110,9 +121,10 @@ def panel_keyboard(config):
     rows.append(
         [
             {"text": "⚡ Check now", "callback_data": "check"},
-            {"text": "🔄 Refresh", "callback_data": "refresh"},
+            {"text": "🕒 Last checks", "callback_data": "last"},
         ]
     )
+    rows.append([{"text": "🔄 Refresh", "callback_data": "refresh"}])
     return rows
 
 
@@ -130,6 +142,130 @@ def status_text(config):
         when = "never checked" if elapsed is None else f"checked {elapsed:.0f} min ago"
         lines.append(f"{mark} {source['label']} - {tracked} tracked, {when}")
     return "\n".join(lines)
+
+
+def timezone_name(config=None):
+    """
+    The clock to print times on.
+
+    Telegram gives us no way to discover this. An update carries the sender's
+    id, name, language_code and a UTC timestamp - nothing about where they
+    are. So it is a setting: config supplies the starting value and
+    /timezone overrides it from then on.
+    """
+    stored = store.get_setting(TIMEZONE_KEY)
+    if stored:
+        return stored
+    configured = (config or {}).get("telegram", {}).get("timezone")
+    return configured or DEFAULT_TIMEZONE
+
+
+def user_zone(config=None):
+    """The named zone, falling back to UTC rather than failing a command."""
+    name = timezone_name(config)
+    try:
+        return name, ZoneInfo(name)
+    except Exception:
+        log.warning("unknown timezone %r, showing UTC", name)
+        return "UTC", utc_timezone.utc
+
+
+def set_timezone(name):
+    """Store a zone name, rejecting anything zoneinfo cannot resolve."""
+    name = name.strip()
+    try:
+        ZoneInfo(name)
+    except Exception:
+        raise ValueError(name)
+    store.set_setting(TIMEZONE_KEY, name)
+    return name
+
+
+def suggest_timezones(fragment, limit=8):
+    """Names containing the fragment, so a typo gets a hint back."""
+    fragment = fragment.strip().lower()
+    if len(fragment) < 2:
+        return []
+    return sorted(name for name in available_timezones() if fragment in name.lower())[:limit]
+
+
+def _ago(minutes):
+    """Elapsed minutes as something readable at a glance."""
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes:.0f} min ago"
+    hours = minutes / 60
+    if hours < 24:
+        whole = int(hours)
+        rest = int(minutes - whole * 60)
+        return f"{whole}h {rest}m ago" if rest else f"{whole}h ago"
+    return f"{hours / 24:.1f} days ago"
+
+
+def last_checks_text(config):
+    """
+    When each source last ran, on your clock.
+
+    A source is quiet for two very different reasons - nothing new, or it
+    never ran - and only the timestamp tells them apart.
+    """
+    name, zone = user_zone(config)
+    now = datetime.now(utc_timezone.utc)
+    lines = [f"🕒 Last checked  ({name})", ""]
+
+    newest = None
+    for source in registry.SOURCES:
+        key = source["config"]
+        if not config.get(key, {}).get("enabled", False):
+            lines.append(f"➖ {source['label']} - not configured")
+            continue
+
+        mark = "✅" if source_enabled(key, config) else "🚫"
+        moment = store.last_run(source["store"])
+        if moment is None:
+            lines.append(f"{mark} {source['label']} - never checked")
+            continue
+
+        newest = moment if newest is None else max(newest, moment)
+        elapsed = (now - moment).total_seconds() / 60
+        stamp = moment.astimezone(zone).strftime("%a %d %b, %H:%M")
+        line = f"{mark} {source['label']} - {stamp}  ({_ago(elapsed)})"
+
+        # A source held back on purpose looks identical to a stalled one
+        # unless we say when it comes round again.
+        wait = config.get(key, {}).get("min_interval_minutes")
+        if wait and elapsed < wait:
+            due = moment.timestamp() + wait * 60
+            line += f"\n     next due {datetime.fromtimestamp(due, zone).strftime('%H:%M')}"
+        lines.append(line)
+
+    if newest is not None:
+        stamp = newest.astimezone(zone).strftime("%a %d %b, %H:%M")
+        lines.append(f"\nLast activity: {stamp}")
+    return "\n".join(lines)
+
+
+def timezone_text(config, argument=None):
+    """Show the clock, or change it when given a name."""
+    if not argument:
+        name, zone = user_zone(config)
+        here = datetime.now(zone).strftime("%a %d %b, %H:%M")
+        return (
+            f"🕒 Times are shown in {name}\nRight now that is {here}.\n\n"
+            "Change it with a zone name, for example:\n"
+            "/timezone Europe/Amsterdam\n/timezone Asia/Tehran"
+        )
+
+    try:
+        name = set_timezone(argument)
+    except ValueError:
+        hints = suggest_timezones(argument)
+        tail = "\n\nDid you mean:\n" + "\n".join(hints) if hints else ""
+        return f"❓ I do not know the zone {argument!r}.{tail}"
+
+    here = datetime.now(ZoneInfo(name)).strftime("%a %d %b, %H:%M")
+    return f"🕒 Times now shown in {name}.\nRight now that is {here}."
 
 
 class Replies:
@@ -293,6 +429,12 @@ class Controller:
             )
         if command == "status":
             return self.replies.send(slot, status_text(self.config))
+        if command in ("last", "checks", "lastcheck"):
+            return self.replies.send(slot, last_checks_text(self.config))
+        if command in ("timezone", "tz", "time"):
+            # Everything after the command word is the zone name.
+            argument = text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else None
+            return self.replies.send(slot, timezone_text(self.config, argument))
         if command == "pause":
             set_paused(True)
             return self.replies.send(slot, "⏸ Alerts paused. Nothing will be sent.")
@@ -342,6 +484,11 @@ class Controller:
             # will not swallow the panel that is sitting right above it.
             slot = self.replies.open(chat_id, message.get("message_thread_id"))
             note = "Checking now…" if self.run_now(reply_to=slot) else "Already running"
+        elif data == "last":
+            # Same reasoning: its own slot, posted below the untouched panel.
+            slot = self.replies.open(chat_id, message.get("message_thread_id"))
+            self.replies.send(slot, last_checks_text(self.config))
+            note = "Last checks"
 
         self.bot.answer_callback(query["id"], note)
         if chat_id and message_id:
