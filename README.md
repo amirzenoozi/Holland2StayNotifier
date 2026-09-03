@@ -10,7 +10,7 @@ Four sources, polled independently:
 | **Holland2Stay** | every residence in their sitemap | by city | free, or 1 credit if Cloudflare blocks |
 | **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… | 1 credit per poll |
 | **Huurwoningen** | any saved search you paste in | area + radius, price, rooms, interior, pets, garden… | 1 credit per poll |
-| **ikwilhuren.nu** | their whole national catalogue | by city | free |
+| **ikwilhuren.nu** | their whole national catalogue | by city, or by radius on the map | free |
 
 Enable any combination.
 
@@ -141,7 +141,13 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "ikwilhuren": {
     "enabled": true,
-    "cities": ["Amersfoort", "Nijkerk", "Leusden", "Utrecht"]
+    "areas": [
+      { "place": "Nijkerk",    "radius_km": 40 },
+      { "place": "Utrecht",    "radius_km": 20 },
+      { "place": "Amersfoort", "radius_km": 20 },
+      { "place": "Zwolle",     "radius_km": 20 }
+    ],
+    "cities": ["Nijmegen"]
   }
 }
 ```
@@ -175,11 +181,24 @@ from huurwoningen.nl:
 
 Its default sort is already newest-first, so no sort parameter is needed.
 
-**ikwilhuren.nu** takes a plain `cities` list instead of searches, because the
-site returns its entire national catalogue in one request and the filtering
-happens here. Spell the city as the site does (`Amersfoort`, `Utrecht`,
-`Den Haag`); matching is case-insensitive. Leave `cities` out to be notified
-about every listing in the country.
+**ikwilhuren.nu** takes places rather than searches, because the site returns
+its entire national catalogue in one request and the filtering happens here.
+There are two ways to say what you want, and a listing only has to satisfy one
+of them:
+
+- `areas` draws circles on the map: `{ "place": "Nijkerk", "radius_km": 40 }`
+  notifies about anything within 40 km of Nijkerk, including villages you would
+  never have thought to name.
+- `cities` names towns exactly, spelled as the site spells them
+  (`Amersfoort`, `Den Haag`); matching is case-insensitive.
+
+Leave both out to be notified about every listing in the country.
+
+Radius matching works by putting each listing on the map from the four-digit
+part of its postcode, using [PDOK](https://www.pdok.nl/), the Dutch
+government's geocoder — free, no key, no account. Every answer is cached in
+the database, so each postcode area and each anchor town is looked up once and
+never again.
 
 ### Finding your chat and topic IDs
 
@@ -249,6 +268,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 | --- | --- | --- |
 | `telegram.admin_ids` | `[]` | user ids allowed to use the commands and buttons; empty means nobody |
 | `holland2stay.cities` / `ikwilhuren.cities` | — | city names to notify about (case-insensitive) |
+| `ikwilhuren.areas` | — | circles on the map: `{"place": "Nijkerk", "radius_km": 40}`. A listing matches if it falls in any circle **or** the city list |
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |
 | `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
 

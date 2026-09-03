@@ -41,6 +41,12 @@
 
   "ikwilhuren": {
     "enabled": true,
-    "cities": ["Amersfoort", "Nijkerk", "Leusden", "Hoevelaken", "Barneveld", "Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen"]
+    "areas": [
+      { "place": "Nijkerk", "radius_km": 40 },
+      { "place": "Utrecht", "radius_km": 20 },
+      { "place": "Amersfoort", "radius_km": 20 },
+      { "place": "Zwolle", "radius_km": 20 }
+    ],
+    "cities": ["Nijmegen"]
   }
 }

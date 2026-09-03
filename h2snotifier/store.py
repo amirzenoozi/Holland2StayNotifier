@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS settings (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS places (
+    query       TEXT PRIMARY KEY,
+    lat         REAL,
+    lon         REAL,
+    looked_up_at TEXT NOT NULL
+);
 """
 
 
@@ -131,6 +137,31 @@ def counts_by_source():
             "SELECT source, COUNT(*) FROM listings GROUP BY source"
         ).fetchall()
     return dict(rows)
+
+
+def get_place(query):
+    """
+    Cached coordinates for a place name or postcode.
+
+    Three distinct answers, which the caller has to tell apart: `None` means
+    we have never looked, `(lat, lon)` means we know, and `(None, None)`
+    means we looked and the geocoder had nothing - worth remembering so we
+    do not ask again every cycle.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT lat, lon FROM places WHERE query = ?", (query,)
+        ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def set_place(query, lat, lon):
+    with _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO places (query, lat, lon, looked_up_at)"
+            " VALUES (?, ?, ?, ?)",
+            (query, lat, lon, _now()),
+        )
 
 
 def street_city(prefix):

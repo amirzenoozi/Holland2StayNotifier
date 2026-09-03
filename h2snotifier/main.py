@@ -18,6 +18,7 @@ from functools import partial
 
 import control
 import funda
+import geo
 import h2s
 import huurwoningen
 import ikwilhuren
@@ -257,10 +258,17 @@ def run_ikwilhuren(config, notifier, debug):
     ikwilhuren.nu hands us the whole country in one free request, so the work
     is filtering rather than fetching: we keep a record of every listing we
     have seen (that is what makes the next diff correct) but only notify about
-    the cities being watched.
+    the places being watched.
+
+    Two ways to say what to watch, and a listing only has to satisfy one of
+    them: `cities` names towns exactly, `areas` draws circles on the map. The
+    circles are the useful one - "within 40 km of Nijkerk" catches villages
+    you would never have thought to name.
     """
     name = ikwilhuren.NAME
     targets = {c.strip().lower() for c in config.get("cities", [])}
+    areas = geo.resolve_areas(config.get("areas"))
+    filtering = bool(targets or areas)
 
     known = store.known_keys(source=name)
     found = ikwilhuren.fetch_catalogue()
@@ -277,9 +285,14 @@ def run_ikwilhuren(config, notifier, debug):
     for url_key in new_keys:
         listing = found[url_key]
         city = listing.get("city") or ""
-        if targets and city.strip().lower() not in targets:
-            store.record(url_key, city=city, notified=True, source=name)
-            continue
+
+        if filtering and city.strip().lower() not in targets:
+            area = geo.area_match(listing, areas)
+            if not area:
+                store.record(url_key, city=city, notified=True, source=name)
+                continue
+            log.info("%s: %s is inside %s", name, city or url_key, area["place"])
+
         ok = _notify(listing, notifier, city)
         sent += bool(ok)
         store.record(url_key, city=city, notified=ok, source=name)
