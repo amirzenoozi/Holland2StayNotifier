@@ -7,6 +7,7 @@
 
   "holland2stay": {
     "enabled": true,
+    "min_interval_minutes": 60,
     "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort"],
     "max_lookups_per_cycle": 25
   },

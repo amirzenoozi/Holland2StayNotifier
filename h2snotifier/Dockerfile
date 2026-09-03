@@ -4,7 +4,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DB_PATH=/data/listings.db \
     CONFIG_PATH=/app/config.json \
-    RUN_INTERVAL=3600
+    RUN_INTERVAL=600
 
 WORKDIR /app
 

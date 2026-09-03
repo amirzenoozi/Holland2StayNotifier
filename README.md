@@ -240,7 +240,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RUN_INTERVAL` | `3600` | seconds between polls |
+| `RUN_INTERVAL` | `600` | seconds between polls — the fastest any source can run |
 | `CONFIG_PATH` | `/app/config.json` | config location in the container |
 | `DB_PATH` | `/data/listings.db` | SQLite state (persisted in a volume) |
 | `RUN_ONCE` | unset | set to `1` to run a single cycle and exit, instead of looping and listening |
@@ -252,12 +252,22 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |
 | `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
 
-**On the interval and cost.** Each poll costs 1 Firecrawl credit per search page,
-so hourly ≈ 720 credits/month per source against a 1,000/month free plan. With
-two paid sources, hourly polling does not fit — set `min_interval_minutes: 120`
-on each (≈ 360/month each) and leave `RUN_INTERVAL` at an hour so the free
-sources (ikwilhuren.nu always, Holland2Stay whenever plain HTTP succeeds) keep
-checking every cycle.
+**On the interval and cost.** `RUN_INTERVAL` sets how fast the loop turns, and
+that is the fastest any source can run; `min_interval_minutes` only holds a
+source *back*. So run the loop at the speed the free sources deserve and pin the
+paid ones.
+
+ikwilhuren.nu costs nothing — one plain HTTP request to their own server, no
+Firecrawl, and the whole catalogue comes back in it. The Holland2Stay sitemap is
+free too whenever plain HTTP gets through, but falls back to Firecrawl (1 credit)
+when Cloudflare shuts the door, so it is worth pinning as well. Funda and
+Huurwoningen cost 1 credit per search page every time.
+
+The shipped defaults — a 10-minute loop, 60 minutes on Holland2Stay, 120 on
+Funda and Huurwoningen — check the free sources six times an hour while keeping
+the paid ones near 360 credits/month each, inside the 1,000/month free plan.
+Detail-page fetches are unaffected by the interval: each new listing is fetched
+exactly once however often you look.
 
 ## Operating
 

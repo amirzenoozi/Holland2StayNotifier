@@ -9,11 +9,13 @@ services:
     env_file:
       - .env
     environment:
-      # Seconds between checks. 3600 keeps Firecrawl usage inside the
-      # 1000 credits/month plan (worst case 1 credit per check = ~720/month).
-      # The sitemap is fetched directly first, which is free when Cloudflare
-      # allows it, so real usage is normally far lower.
-      RUN_INTERVAL: 3600
+      # Seconds between checks. This is the fastest any source can run;
+      # a source that costs credits holds itself back with
+      # min_interval_minutes in config.json. 600 suits the free sources
+      # (ikwilhuren.nu always, the Holland2Stay sitemap whenever plain HTTP
+      # succeeds) without letting the paid ones anywhere near the
+      # 1000 credits/month plan.
+      RUN_INTERVAL: 600
     volumes:
       # Cities to watch + Telegram chat/topic. Edit, then `docker compose restart`.
       - ./config.json:/app/config.json:ro
