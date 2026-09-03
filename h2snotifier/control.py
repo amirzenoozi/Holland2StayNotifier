@@ -138,7 +138,9 @@ def status_text(config):
             continue
         mark = "✅" if source_enabled(key, config) else "🚫"
         tracked = counts.get(source["store"], 0)
-        elapsed = store.minutes_since_run(source["store"])
+        # Listings are filed under the store name, runs under the config
+        # name. Mixing the two makes Holland2Stay look like it never ran.
+        elapsed = store.minutes_since_run(key)
         when = "never checked" if elapsed is None else f"checked {elapsed:.0f} min ago"
         lines.append(f"{mark} {source['label']} - {tracked} tracked, {when}")
     return "\n".join(lines)
@@ -222,7 +224,7 @@ def last_checks_text(config):
             continue
 
         mark = "✅" if source_enabled(key, config) else "🚫"
-        moment = store.last_run(source["store"])
+        moment = store.last_run(key)
         if moment is None:
             lines.append(f"{mark} {source['label']} - never checked")
             continue

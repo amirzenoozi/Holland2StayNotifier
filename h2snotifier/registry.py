@@ -6,6 +6,11 @@ config key names the block in config.json, while the store key is what is
 written into the database's `source` column. They differ for historical
 reasons - the first source shipped as "h2s" - and renaming the store key
 would orphan every row already recorded.
+
+Which name a table wants is decided by whoever writes it: `listings` is
+filed under the store key, while `runs` and `settings` are written by the
+scheduler and so use the config key. Reading one with the other silently
+returns nothing rather than failing, so it is worth checking.
 """
 
 SOURCES = (
