@@ -165,6 +165,7 @@ cython_debug/
 .env
 config.json
 *.db
+data/
 h2snotifier/config.json
 h2snotifier/houses.db
 h2snotifier/house_sync.log

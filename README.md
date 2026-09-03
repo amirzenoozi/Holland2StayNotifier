@@ -282,7 +282,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 | --- | --- | --- |
 | `RUN_INTERVAL` | `600` | seconds between polls — the fastest any source can run |
 | `CONFIG_PATH` | `/app/config.json` | config location in the container |
-| `DB_PATH` | `/data/listings.db` | SQLite state (persisted in a volume) |
+| `DB_PATH` | `/data/listings.db` | SQLite state, bind-mounted to `./data/listings.db` next to the compose file |
 | `RUN_ONCE` | unset | set to `1` to run a single cycle and exit, instead of looping and listening |
 
 | Config key | Default | Meaning |
@@ -321,10 +321,41 @@ docker compose pull && docker compose up -d   # update to the latest image
 docker compose restart      # apply config.json changes
 ```
 
-State lives in the `h2s_data` volume. Deleting it makes the next run re-seed
-silently — it will not re-notify you about everything. That volume also holds
-the pause and per-source switches, so they survive `down`/`up` and image
-updates.
+### Where the data lives
+
+Everything the bot remembers sits in one SQLite file beside the compose file:
+
+```
+rental-notifier/
+├── .env                 bot token, Firecrawl key
+├── config.json          what to watch, who may command it
+├── docker-compose.yml
+└── data/
+    └── listings.db      ← every listing seen, per source
+```
+
+| Table | What it holds |
+| --- | --- |
+| `listings` | every listing key ever seen, with its source and city |
+| `streets` | learned street → city map, so Holland2Stay skips other cities for free |
+| `places` | geocoded coordinates, cached forever, misses included |
+| `runs` | when each source last ran |
+| `settings` | pause state, per-source switches, your timezone |
+
+Back it up or read it with plain `sqlite3` — no Docker needed:
+
+```bash
+sqlite3 data/listings.db "select source, count(*) from listings group by source"
+cp data/listings.db ~/listings-backup.db
+```
+
+Deleting the file makes the next run re-seed silently — it will not re-notify
+you about everything, but it forgets anything posted while it was down. The
+switches live there too, so pause and per-source state survive `down`/`up` and
+image updates.
+
+Logs are not written to a file; they go to stdout and Docker keeps them
+(`docker compose logs -f`), capped at 10 MB × 3.
 
 To force a check by hand, use `/check` in Telegram, or:
 
