@@ -126,17 +126,19 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 120,
+    "min_interval_minutes": 180,
     "searches": [
-      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" }
+      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" },
+      { "name": "Hilversum 5km",   "area": "hilversum",  "radius": "5km",  "type": "huur", "price": "1000-2000" }
     ]
   },
 
   "huurwoningen": {
     "enabled": true,
-    "min_interval_minutes": 120,
+    "min_interval_minutes": 180,
     "searches": [
-      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "price": "1000-2000" }
+      { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "price": "1000-2000" },
+      { "name": "Hilversum 10km",  "area": "hilversum",  "radius": "10km", "price": "1000-2000" }
     ]
   },
 
@@ -144,6 +146,7 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
     "enabled": true,
     "areas": [
       { "place": "Nijkerk",    "radius_km": 40 },
+      { "place": "Hilversum",  "radius_km": 20 },
       { "place": "Utrecht",    "radius_km": 20 },
       { "place": "Amersfoort", "radius_km": 20 },
       { "place": "Zwolle",     "radius_km": 20 }
@@ -171,6 +174,13 @@ address bar, and paste it:
 
 That gives you every filter Funda has without this project needing to model any
 of them. Add `"sort=%22date_down%22"` so the newest listings stay on page one.
+
+**Keep Funda radii tight.** Only page one is ever read — fifteen results, newest
+first — so a wide ring does not find you more, it crowds out the town you
+actually care about. Searching Hilversum at 5 km returns nine Hilversum listings
+plus its neighbours; the same search at 10 km returns one, because Utrecht and
+Almere got there first. Prefer several narrow searches over one wide one.
+Huurwoningen does not have this problem — it returns about thirty per page.
 
 **Huurwoningen searches** work the same way: structured fields (`area`, `radius`,
 `price`, plus any extra query parameters under `params`) or a raw `url` copied
@@ -280,7 +290,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RUN_INTERVAL` | `600` | seconds between polls — the fastest any source can run |
+| `RUN_INTERVAL` | `120` | seconds between polls — the fastest any source can run |
 | `CONFIG_PATH` | `/app/config.json` | config location in the container |
 | `DB_PATH` | `/data/listings.db` | SQLite state, bind-mounted to `./data/listings.db` next to the compose file |
 | `RUN_ONCE` | unset | set to `1` to run a single cycle and exit, instead of looping and listening |
@@ -305,11 +315,13 @@ free too whenever plain HTTP gets through, but falls back to Firecrawl (1 credit
 when Cloudflare shuts the door, so it is worth pinning as well. Funda and
 Huurwoningen cost 1 credit per search page every time.
 
-The shipped defaults — a 10-minute loop, 60 minutes on Holland2Stay, 120 on
-Funda and Huurwoningen — check the free sources six times an hour while keeping
-the paid ones near 360 credits/month each, inside the 1,000/month free plan.
-Detail-page fetches are unaffected by the interval: each new listing is fetched
-exactly once however often you look.
+The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 180 on Funda
+and Huurwoningen — poll ikwilhuren.nu thirty times an hour for nothing, while the
+paid sources still turn eight times a day. Two search pages each at that rate is
+about 480 credits/month, inside the 1,000/month free plan. Because
+`min_interval_minutes` counts real minutes rather than loop turns, speeding the
+loop up does not drag the paid sources with it. Detail-page fetches are
+unaffected too: each new listing is fetched exactly once however often you look.
 
 ## Operating
 

@@ -9,18 +9,25 @@
   "holland2stay": {
     "enabled": true,
     "min_interval_minutes": 60,
-    "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort"],
+    "cities": ["Utrecht", "Nijmegen", "Zeist", "Nieuwegein", "Maarssen", "Amersfoort", "Hilversum"],
     "max_lookups_per_cycle": 25
   },
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 120,
+    "min_interval_minutes": 180,
     "searches": [
       {
         "name": "Amersfoort 10km",
         "area": "amersfoort",
         "radius": "10km",
+        "type": "huur",
+        "price": "1000-2000"
+      },
+      {
+        "name": "Hilversum 5km",
+        "area": "hilversum",
+        "radius": "5km",
         "type": "huur",
         "price": "1000-2000"
       }
@@ -29,11 +36,17 @@
 
   "huurwoningen": {
     "enabled": true,
-    "min_interval_minutes": 120,
+    "min_interval_minutes": 180,
     "searches": [
       {
         "name": "Amersfoort 10km",
         "area": "amersfoort",
+        "radius": "10km",
+        "price": "1000-2000"
+      },
+      {
+        "name": "Hilversum 10km",
+        "area": "hilversum",
         "radius": "10km",
         "price": "1000-2000"
       }
@@ -44,6 +57,7 @@
     "enabled": true,
     "areas": [
       { "place": "Nijkerk", "radius_km": 40 },
+      { "place": "Hilversum", "radius_km": 20 },
       { "place": "Utrecht", "radius_km": 20 },
       { "place": "Amersfoort", "radius_km": 20 },
       { "place": "Zwolle", "radius_km": 20 }

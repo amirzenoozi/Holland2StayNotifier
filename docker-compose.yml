@@ -11,11 +11,10 @@ services:
     environment:
       # Seconds between checks. This is the fastest any source can run;
       # a source that costs credits holds itself back with
-      # min_interval_minutes in config.json. 600 suits the free sources
-      # (ikwilhuren.nu always, the Holland2Stay sitemap whenever plain HTTP
-      # succeeds) without letting the paid ones anywhere near the
-      # 1000 credits/month plan.
-      RUN_INTERVAL: 600
+      # min_interval_minutes in config.json, counted in real minutes, so
+      # speeding this up does not speed those up. 120 is set for
+      # ikwilhuren.nu, which is free and has no hold-back of its own.
+      RUN_INTERVAL: 120
     volumes:
       # Cities to watch + Telegram chat/topic. Edit, then `docker compose restart`.
       - ./config.json:/app/config.json:ro
