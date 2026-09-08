@@ -133,7 +133,7 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 240,
+    "min_interval_minutes": 360,
     "searches": [
       { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" },
       { "name": "Hilversum 5km",   "area": "hilversum",  "radius": "5km",  "type": "huur", "price": "1000-2000" }
@@ -142,9 +142,11 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "pararius": {
     "enabled": true,
-    "min_interval_minutes": 240,
+    "min_interval_minutes": 360,
     "searches": [
-      { "name": "Amersfoort 25km", "area": "amersfoort", "radius": "25km", "price": "0-2000" },
+      { "name": "Amersfoort 15km", "area": "amersfoort", "radius": "15km", "price": "0-2000" },
+      { "name": "Utrecht 10km",    "area": "utrecht",    "radius": "10km", "price": "0-2000" },
+      { "name": "Hilversum 10km",  "area": "hilversum",  "radius": "10km", "price": "0-2000" },
       { "name": "Zwolle 20km",     "area": "zwolle",     "radius": "20km", "price": "0-2000" },
       { "name": "Nijmegen 10km",   "area": "nijmegen",   "radius": "10km", "price": "0-2000" }
     ]
@@ -192,20 +194,22 @@ address bar, and paste it:
 That gives you every filter Funda has without this project needing to model any
 of them. Add `"sort=%22date_down%22"` so the newest listings stay on page one.
 
-**Keep Funda radii tight.** Only page one is ever read — fifteen results, newest
-first — so a wide ring does not find you more, it crowds out the town you
-actually care about. Searching Hilversum at 5 km returns nine Hilversum listings
-plus its neighbours; the same search at 10 km returns one, because Utrecht and
-Almere got there first. Prefer several narrow searches over one wide one.
-Pararius and Huurwoningen do not have this problem — both return about thirty
-per page.
+**Keep radii tight.** Only page one is ever read, so a wide ring does not find
+you more — it crowds out the town you actually care about. Funda feels this
+hardest at fifteen results per page: Hilversum at 5 km returns nine Hilversum
+listings, the same search at 10 km returns one, because Utrecht and Almere got
+there first. Pararius has the same trap at thirty per page — Amersfoort at 25 km
+returns two Amersfoort listings out of thirty, while at 15 km it returns seven
+out of seventeen. Prefer several narrow searches over one wide one; each costs
+the same single credit, and a search that is dense in its own town is worth far
+more than one that spills into a neighbour you already cover.
 
 **Pararius searches** put their filters in the URL *path* rather than a query
 string, so structured fields (`area`, `radius`, `price`, `dwelling_type`) are
 assembled into one, or you can paste a raw `url` copied from pararius.com:
 
 ```json
-{ "name": "Amersfoort 25km", "url": "https://www.pararius.com/apartments/amersfoort/0-2000/radius-25" }
+{ "name": "Amersfoort 15km", "url": "https://www.pararius.com/apartments/amersfoort/0-2000/radius-15" }
 ```
 
 `price` is a `min-max` pair, so `"0-2000"` means anything up to €2000. The
@@ -347,12 +351,15 @@ free too whenever plain HTTP gets through, but falls back to Firecrawl (1 credit
 when Cloudflare shuts the door, so it is worth pinning as well. Funda, Pararius
 and Huurwoningen cost 1 credit per search page every time.
 
-The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 240 on Funda
+The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 360 on Funda
 and Pararius, Huurwoningen switched off — poll ikwilhuren.nu thirty times an hour
-for nothing, while the paid sources turn six times a day. Funda's two search
-pages come to about 360 credits/month and Pararius's three to about 540, so
-roughly 900 in total, inside the 1,000/month free plan. Turning Huurwoningen back
-on adds another 360, which puts you over it — that is the trade to weigh. Because
+for nothing, while the paid sources turn four times a day. Seven paid search
+pages (Funda's two, Pararius's five) at four polls a day is about 840
+credits/month, inside the 1,000/month free plan with room to spare for the
+Holland2Stay sitemap if Cloudflare ever closes the free route. The arithmetic to
+remember is that each search page costs `30 × 24 / interval_hours` credits a
+month, so seven pages at four hours would be 1,260 — over the plan. Turning
+Huurwoningen back on adds two more pages, another 240 at this interval. Because
 `min_interval_minutes` counts real minutes rather than loop turns, speeding the
 loop up does not drag the paid sources with it. Detail-page fetches are
 unaffected too: each new listing is fetched exactly once however often you look.

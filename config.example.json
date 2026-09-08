@@ -15,7 +15,7 @@
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 240,
+    "min_interval_minutes": 360,
     "searches": [
       {
         "name": "Amersfoort 10km",
@@ -55,12 +55,24 @@
 
   "pararius": {
     "enabled": true,
-    "min_interval_minutes": 240,
+    "min_interval_minutes": 360,
     "searches": [
       {
-        "name": "Amersfoort 25km",
+        "name": "Amersfoort 15km",
         "area": "amersfoort",
-        "radius": "25km",
+        "radius": "15km",
+        "price": "0-2000"
+      },
+      {
+        "name": "Utrecht 10km",
+        "area": "utrecht",
+        "radius": "10km",
+        "price": "0-2000"
+      },
+      {
+        "name": "Hilversum 10km",
+        "area": "hilversum",
+        "radius": "10km",
         "price": "0-2000"
       },
       {
