@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY fetcher.py h2s.py funda.py huurwoningen.py ikwilhuren.py \
+COPY fetcher.py h2s.py funda.py huurwoningen.py ikwilhuren.py pararius.py \
      geo.py registry.py control.py store.py telegram.py main.py ./
 RUN mkdir -p /data
 

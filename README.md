@@ -1,14 +1,15 @@
-# Rental Notifier — Holland2Stay + Funda + Huurwoningen + ikwilhuren.nu
+# Rental Notifier — Holland2Stay + Funda + Pararius + Huurwoningen + ikwilhuren.nu
 
 Watches Dutch rental listings and posts new ones to a Telegram group — optionally
 into a specific **forum topic**, so the alerts stay out of your normal chat.
 
-Four sources, polled independently:
+Five sources, polled independently:
 
 | Source | What it watches | Filter | Cost |
 | --- | --- | --- | --- |
 | **Holland2Stay** | every residence in their sitemap | by city | free, or 1 credit if Cloudflare blocks |
 | **Funda** | any saved search you paste in | anything Funda's UI can filter: area + radius, price, type, rooms, energy label… | 1 credit per poll |
+| **Pararius** | any saved search you paste in | area + radius, price, dwelling type | 1 credit per poll |
 | **Huurwoningen** | any saved search you paste in | area + radius, price, rooms, interior, pets, garden… | 1 credit per poll |
 | **ikwilhuren.nu** | their whole national catalogue | by city, or by radius on the map | free |
 
@@ -46,7 +47,7 @@ no longer works, and cannot be fixed by configuration:
 | --- | --- | --- |
 | Data source | Magento GraphQL API | sitemap + page scraping |
 | Cloudflare | blocked | handled |
-| Sources | Holland2Stay | Holland2Stay **+ Funda + Huurwoningen + ikwilhuren.nu** |
+| Sources | Holland2Stay | Holland2Stay **+ Funda + Pararius + Huurwoningen + ikwilhuren.nu** |
 | Telegram topics | ✗ | ✓ |
 | Scheduling | host cron | built into the container |
 | Deploy | manual venv | `docker compose up -d` |
@@ -61,10 +62,16 @@ keys trigger a detail-page fetch, and each street's city is cached the first tim
 it is seen — so a new listing in an already-known building is filtered by city
 for free, and listings outside your cities are never fetched at all.
 
-**Funda** and **Huurwoningen** — both block plain HTTP outright, so their search
-pages always go through Firecrawl (1 credit each). A single search page carries
-full listing data for 15–25 listings, so there is no per-listing fetch. Both are
-sorted newest-first, which makes pagination unnecessary.
+**Funda**, **Pararius** and **Huurwoningen** — all three block plain HTTP
+outright, so their search pages always go through Firecrawl (1 credit each). A
+single search page carries full listing data for 15–30 listings, so there is no
+per-listing fetch. All three are sorted newest-first, which makes pagination
+unnecessary.
+
+Pararius and Huurwoningen are the same company, but they are **not** the same
+inventory: a like-for-like search of Amersfoort within 10 km returned 8 listings
+on Pararius and 25 on Huurwoningen, with only 3 in common. Run both if you want
+the coverage; run one if you want the credits.
 
 **ikwilhuren.nu** has no bot protection at all, so it never costs a credit. Its
 search form is a POST, but the server ignores the filter fields — so the notifier
@@ -73,8 +80,8 @@ one request (~330 listings) and filters by city locally. No detail fetches
 either; one cycle is one HTTP request.
 
 Paid sources can be throttled independently with `min_interval_minutes`, so you
-can poll the free sources hourly while only spending Firecrawl credits on Funda
-and Huurwoningen every few hours.
+can poll the free sources hourly while only spending Firecrawl credits on Funda,
+Pararius and Huurwoningen every few hours.
 
 **The first run of each source is silent.** Everything currently listed is
 recorded as already-seen so you are not flooded with a hundred messages. Enabling
@@ -126,15 +133,25 @@ DEBUGGING_CHAT_ID=-1001234567890   # optional: where errors are reported
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 180,
+    "min_interval_minutes": 240,
     "searches": [
       { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "type": "huur", "price": "1000-2000" },
       { "name": "Hilversum 5km",   "area": "hilversum",  "radius": "5km",  "type": "huur", "price": "1000-2000" }
     ]
   },
 
-  "huurwoningen": {
+  "pararius": {
     "enabled": true,
+    "min_interval_minutes": 240,
+    "searches": [
+      { "name": "Amersfoort 25km", "area": "amersfoort", "radius": "25km", "price": "0-2000" },
+      { "name": "Zwolle 20km",     "area": "zwolle",     "radius": "20km", "price": "0-2000" },
+      { "name": "Nijmegen 10km",   "area": "nijmegen",   "radius": "10km", "price": "0-2000" }
+    ]
+  },
+
+  "huurwoningen": {
+    "enabled": false,
     "min_interval_minutes": 180,
     "searches": [
       { "name": "Amersfoort 10km", "area": "amersfoort", "radius": "10km", "price": "1000-2000" },
@@ -180,7 +197,20 @@ first — so a wide ring does not find you more, it crowds out the town you
 actually care about. Searching Hilversum at 5 km returns nine Hilversum listings
 plus its neighbours; the same search at 10 km returns one, because Utrecht and
 Almere got there first. Prefer several narrow searches over one wide one.
-Huurwoningen does not have this problem — it returns about thirty per page.
+Pararius and Huurwoningen do not have this problem — both return about thirty
+per page.
+
+**Pararius searches** put their filters in the URL *path* rather than a query
+string, so structured fields (`area`, `radius`, `price`, `dwelling_type`) are
+assembled into one, or you can paste a raw `url` copied from pararius.com:
+
+```json
+{ "name": "Amersfoort 25km", "url": "https://www.pararius.com/apartments/amersfoort/0-2000/radius-25" }
+```
+
+`price` is a `min-max` pair, so `"0-2000"` means anything up to €2000. The
+`/apartments/` section is the generic rental listing — houses, studios and rooms
+all show up in it. Default sort is newest-first, so no sort parameter is needed.
 
 **Huurwoningen searches** work the same way: structured fields (`area`, `radius`,
 `price`, plus any extra query parameters under `params`) or a raw `url` copied
@@ -247,11 +277,12 @@ message and leaves the last one alone. House alerts are never replaced.
 🎛 Notifier control
 
 ▶️ Alerts are running
-Listening to: Holland2Stay, Huurwoningen, ikwilhuren.nu
+Listening to: Holland2Stay, Pararius, ikwilhuren.nu
 
 [✅ Holland2Stay]
 [🚫 Funda]
-[✅ Huurwoningen]
+[✅ Pararius]
+[🚫 Huurwoningen]
 [✅ ikwilhuren.nu]
 [⏸ Pause alerts]
 [⚡ Check now]  [🕒 Last checks]
@@ -300,6 +331,7 @@ find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
 | `telegram.admin_ids` | `[]` | user ids allowed to use the commands and buttons; empty means nobody |
 | `telegram.timezone` | `Europe/Amsterdam` | clock used for times in `/last`; `/timezone` overrides it and wins |
 | `holland2stay.cities` / `ikwilhuren.cities` | — | city names to notify about (case-insensitive) |
+| `funda.searches` / `pararius.searches` / `huurwoningen.searches` | — | one entry per saved search: structured fields or a raw pasted `url` |
 | `ikwilhuren.areas` | — | circles on the map: `{"place": "Nijkerk", "radius_km": 40}`. A listing matches if it falls in any circle **or** the city list |
 | `holland2stay.max_lookups_per_cycle` | `15` | cap on detail-page fetches per cycle; listings past the cap are not dropped, just deferred to the next cycle |
 | `<source>.min_interval_minutes` | unset | skip this source unless that many minutes have passed since its last run — how you spend fewer credits on the paid sources without slowing the free one |
@@ -312,13 +344,15 @@ paid ones.
 ikwilhuren.nu costs nothing — one plain HTTP request to their own server, no
 Firecrawl, and the whole catalogue comes back in it. The Holland2Stay sitemap is
 free too whenever plain HTTP gets through, but falls back to Firecrawl (1 credit)
-when Cloudflare shuts the door, so it is worth pinning as well. Funda and
-Huurwoningen cost 1 credit per search page every time.
+when Cloudflare shuts the door, so it is worth pinning as well. Funda, Pararius
+and Huurwoningen cost 1 credit per search page every time.
 
-The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 180 on Funda
-and Huurwoningen — poll ikwilhuren.nu thirty times an hour for nothing, while the
-paid sources still turn eight times a day. Two search pages each at that rate is
-about 480 credits/month, inside the 1,000/month free plan. Because
+The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 240 on Funda
+and Pararius, Huurwoningen switched off — poll ikwilhuren.nu thirty times an hour
+for nothing, while the paid sources turn six times a day. Funda's two search
+pages come to about 360 credits/month and Pararius's three to about 540, so
+roughly 900 in total, inside the 1,000/month free plan. Turning Huurwoningen back
+on adds another 360, which puts you over it — that is the trade to weigh. Because
 `min_interval_minutes` counts real minutes rather than loop turns, speeding the
 loop up does not drag the paid sources with it. Detail-page fetches are
 unaffected too: each new listing is fetched exactly once however often you look.
@@ -396,8 +430,10 @@ h2snotifier/
   fetcher.py              # shared plain-HTTP + Firecrawl fetch layer
   h2s.py                  # Holland2Stay: sitemap + detail parsing
   funda.py                # Funda: search page parsing
+  pararius.py             # Pararius: search page parsing
   huurwoningen.py         # Huurwoningen: search page parsing
   ikwilhuren.py           # ikwilhuren.nu: full catalogue over plain HTTP
+  geo.py                  # PDOK geocoding + radius matching, cached forever
   store.py                # SQLite: seen listings, street→city cache, run times
   telegram.py             # send, edit, long-poll; topics and inline buttons
 .github/workflows/docker-publish.yml   # builds and pushes to GHCR
@@ -407,10 +443,10 @@ h2snotifier/
 
 - Holland2Stay listings report the **exclusive** price only; the inclusive price
   and occupancy sit behind a UI expander that is not in the page markup.
-- Funda and Huurwoningen both prohibit automated access in their terms. Polling
-  one search page every couple of hours is modest, but this is your call to make.
-- Huurwoningen shows `Prijs op aanvraag` on some listings; those are reported as
-  "Price on request" rather than skipped.
+- Funda, Pararius and Huurwoningen all prohibit automated access in their terms.
+  Polling one search page every few hours is modest, but this is your call to make.
+- Huurwoningen shows `Prijs op aanvraag` and Pararius `Price on request` on some
+  listings; those are reported as "Price on request" rather than skipped.
 - Holland2Stay is rebranding to **Codomo**; the URLs this depends on may move.
 - Scraped markup is not an API. When a site redesigns, parsing breaks — errors
   are reported to `DEBUGGING_CHAT_ID` so you find out quickly.

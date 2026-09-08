@@ -15,7 +15,7 @@
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 180,
+    "min_interval_minutes": 240,
     "searches": [
       {
         "name": "Amersfoort 10km",
@@ -35,7 +35,7 @@
   },
 
   "huurwoningen": {
-    "enabled": true,
+    "enabled": false,
     "min_interval_minutes": 180,
     "searches": [
       {
@@ -49,6 +49,31 @@
         "area": "hilversum",
         "radius": "10km",
         "price": "1000-2000"
+      }
+    ]
+  },
+
+  "pararius": {
+    "enabled": true,
+    "min_interval_minutes": 240,
+    "searches": [
+      {
+        "name": "Amersfoort 25km",
+        "area": "amersfoort",
+        "radius": "25km",
+        "price": "0-2000"
+      },
+      {
+        "name": "Zwolle 20km",
+        "area": "zwolle",
+        "radius": "20km",
+        "price": "0-2000"
+      },
+      {
+        "name": "Nijmegen 10km",
+        "area": "nijmegen",
+        "radius": "10km",
+        "price": "0-2000"
       }
     ]
   },

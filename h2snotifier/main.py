@@ -22,6 +22,7 @@ import geo
 import h2s
 import huurwoningen
 import ikwilhuren
+import pararius
 import registry
 import store
 from fetcher import FetchError, SiteUnavailable
@@ -316,6 +317,7 @@ def run_cycle(config, notifier, debug, force=False):
         ("holland2stay", run_h2s),
         ("funda", partial(run_search_source, funda)),
         ("huurwoningen", partial(run_search_source, huurwoningen)),
+        ("pararius", partial(run_search_source, pararius)),
         ("ikwilhuren", run_ikwilhuren),
     )
     for name, runner in runners:

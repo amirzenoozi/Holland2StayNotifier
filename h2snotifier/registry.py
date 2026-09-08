@@ -18,6 +18,7 @@ SOURCES = (
     {"config": "funda", "store": "funda", "label": "Funda"},
     {"config": "huurwoningen", "store": "huurwoningen", "label": "Huurwoningen"},
     {"config": "ikwilhuren", "store": "ikwilhuren", "label": "ikwilhuren.nu"},
+    {"config": "pararius", "store": "pararius", "label": "Pararius"},
 )
 
 CONFIG_KEYS = tuple(source["config"] for source in SOURCES)
