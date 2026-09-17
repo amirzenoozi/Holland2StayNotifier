@@ -281,11 +281,11 @@ message and leaves the last one alone. House alerts are never replaced.
 🎛 Notifier control
 
 ▶️ Alerts are running
-Listening to: Holland2Stay, Pararius, ikwilhuren.nu
+Listening to: Holland2Stay, Funda, ikwilhuren.nu
 
 [✅ Holland2Stay]
-[🚫 Funda]
-[✅ Pararius]
+[✅ Funda]
+[🚫 Pararius]
 [🚫 Huurwoningen]
 [✅ ikwilhuren.nu]
 [⏸ Pause alerts]
@@ -351,15 +351,15 @@ free too whenever plain HTTP gets through, but falls back to Firecrawl (1 credit
 when Cloudflare shuts the door, so it is worth pinning as well. Funda, Pararius
 and Huurwoningen cost 1 credit per search page every time.
 
-The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 360 on Funda
-and Pararius, Huurwoningen switched off — poll ikwilhuren.nu thirty times an hour
-for nothing, while the paid sources turn four times a day. Seven paid search
-pages (Funda's two, Pararius's five) at four polls a day is about 840
-credits/month, inside the 1,000/month free plan with room to spare for the
-Holland2Stay sitemap if Cloudflare ever closes the free route. The arithmetic to
+The shipped defaults — a 2-minute loop, 60 minutes on Holland2Stay, 120 on Funda,
+Pararius and Huurwoningen switched off — poll ikwilhuren.nu thirty times an hour
+for nothing while Funda's two search pages turn twelve times a day, about 720
+credits/month against the 1,000/month free plan. That leaves room for the
+Holland2Stay sitemap if Cloudflare ever closes its free route. The arithmetic to
 remember is that each search page costs `30 × 24 / interval_hours` credits a
-month, so seven pages at four hours would be 1,260 — over the plan. Turning
-Huurwoningen back on adds two more pages, another 240 at this interval. Because
+month, so switching Pararius back on at this interval would add five pages and
+1,800 credits — far over the plan. Every source you enable is a claim on the same
+budget, so pair each one with an interval that pays for it. Because
 `min_interval_minutes` counts real minutes rather than loop turns, speeding the
 loop up does not drag the paid sources with it. Detail-page fetches are
 unaffected too: each new listing is fetched exactly once however often you look.

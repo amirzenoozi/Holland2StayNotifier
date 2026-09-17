@@ -15,7 +15,7 @@
 
   "funda": {
     "enabled": true,
-    "min_interval_minutes": 360,
+    "min_interval_minutes": 120,
     "searches": [
       {
         "name": "Amersfoort 10km",
@@ -54,7 +54,7 @@
   },
 
   "pararius": {
-    "enabled": true,
+    "enabled": false,
     "min_interval_minutes": 360,
     "searches": [
       {
