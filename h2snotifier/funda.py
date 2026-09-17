@@ -8,6 +8,12 @@ interstitial - so every fetch goes through Firecrawl on the `basic` proxy.
 The upside over Holland2Stay: a search results page carries the full listing
 data, so one fetch (1 credit) yields ~15 listings and no per-listing detail
 request is ever needed. Sorting by date_down keeps the newest on page 1.
+
+Funda redesigned that page in September 2026 ("Je zoekpagina, in een nieuw
+jasje"), which silently broke the parser: the address is no longer a markdown
+heading and the price now comes before it rather than after. Scraped markup is
+not an API, so expect this to happen again - the tell is a search returning
+zero listings while the fetch itself reports HTTP 200.
 """
 
 import json
@@ -23,8 +29,10 @@ BASE = "https://www.funda.nl"
 # /detail/huur/amersfoort/huis-de-marke-12/89577194/
 DETAIL_RE = re.compile(r"/detail/(huur|koop)/([^/]+)/([^/]+)/(\d+)/")
 
-# ## [De Marke 12 \ \ 3823 GP Amersfoort](https://www.funda.nl/detail/...)
-HEADING_RE = re.compile(r"^#{1,6}\s*\[(.+?)\]\((https?://[^\s)]+)\)", re.MULTILINE)
+# The address link, e.g. [Bresselaan 5 \\ \\ 3772 PW Barneveld](https://...).
+# Image links are skipped by requiring the text not to start with "!", and the
+# agent link is excluded by requiring a detail URL.
+LINK_RE = re.compile(r"\[([^\]!][^\]]*?)\]\((https://www\.funda\.nl/detail/[^)\s]+)\)", re.S)
 
 PRICE_RE = re.compile(r"€\s*([\d.]+)\s*p\.m\.", re.IGNORECASE)
 POSTCODE_RE = re.compile(r"(\d{4}\s?[A-Z]{2})\s+(.+)$")
@@ -93,28 +101,38 @@ def parse_search(markdown):
     """
     Turn a search results page into listing dicts keyed by Funda's numeric id.
 
-    Every listing appears twice in the markdown (once as an image link, once as
-    a heading), so results are de-duplicated by id.
+    The card is anchored on the address link - the one link per listing whose
+    text carries a postcode. Funda's September 2026 redesign dropped the
+    markdown headings this used to key off, and it puts the price *before* the
+    address rather than after, so each listing needs two windows: the text
+    leading up to its address link holds the price, and the text after it holds
+    the bullet list.
     """
     listings = {}
-    headings = list(HEADING_RE.finditer(markdown))
+    anchors = []
 
-    for index, match in enumerate(headings):
-        title, url = match.group(1), match.group(2)
-        detail = DETAIL_RE.search(url)
-        if not detail:
+    for match in LINK_RE.finditer(markdown):
+        detail = DETAIL_RE.search(match.group(2))
+        if not detail or not POSTCODE_RE.search(match.group(1).replace("\\", " ")):
             continue
+        if any(a[0].group(2) == match.group(2) for a in anchors):
+            continue
+        anchors.append((match, detail))
 
+    for index, (match, detail) in enumerate(anchors):
         listing_id = detail.group(4)
         if listing_id in listings:
             continue
 
-        # Everything up to the next heading belongs to this listing.
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(markdown)
+        # The price sits between the previous card's address and this one's.
+        start = anchors[index - 1][0].end() if index else 0
+        before = markdown[start : match.start()]
+        # The bullets sit between this address and the next card's.
+        end = anchors[index + 1][0].start() if index + 1 < len(anchors) else len(markdown)
         block = markdown[match.end() : end]
 
-        # "De Marke 12 \ \ 3823 GP Amersfoort" -> address + postcode + city
-        cleaned = title.replace("\\", " ")
+        # "Bresselaan 5 \\ \\ 3772 PW Barneveld" -> address + postcode + city
+        cleaned = match.group(1).replace("\\", " ")
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
         address, postcode, city = cleaned, None, detail.group(2).replace("-", " ").title()
         location = POSTCODE_RE.search(cleaned)
@@ -123,7 +141,8 @@ def parse_search(markdown):
             city = location.group(2).strip()
             address = cleaned[: location.start()].strip()
 
-        price_match = PRICE_RE.search(block)
+        price_match = PRICE_RE.search(before)
+        url = match.group(2)
         listing = {
             "source": NAME,
             "url_key": f"funda-{listing_id}",
