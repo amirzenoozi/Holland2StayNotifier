@@ -1,60 +1,53 @@
 """
 The Telegram control panel.
 
-The notifier used to be a one-shot script on a timer with no way to talk to
-it. This module gives it an inbox: it long-polls for commands and button
-taps, and writes the answers into the settings table, which the scrape loop
-consults before every cycle. Nothing here scrapes - it only flips switches.
+One bot serves many groups. This module gives it an inbox: it long-polls for
+commands and button taps and routes each one to the group it came from, where
+it flips that group's switches in the database. Nothing here scrapes.
 
-Access is deliberately blunt. Only the user ids listed in config decide
-anything; everyone else gets turned away, whether they typed a command or
-tapped a button someone else's panel left lying in the chat.
+Access is two-tier. The owner (telegram.admin_ids in config) issues invite
+codes in a private chat; a group admin redeems one with /setup and from then on
+that group's admins manage its filters. Unregistered groups are ignored.
 """
 
 import itertools
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone as utc_timezone
 from zoneinfo import ZoneInfo, available_timezones
 
+import commands
 import registry
 import store
+import subscriptions
 
 log = logging.getLogger("control")
 
-DENIED = "⛔ You do not have access to this feature, call AmirKhan!"
-
-PAUSED_KEY = "paused"
-SOURCE_KEY = "source:{}"
-TIMEZONE_KEY = "timezone"
-
-# Telegram never tells us where you are - see timezone_name() - so we start
-# from the clock the houses are in and let you say otherwise.
-DEFAULT_TIMEZONE = "Europe/Amsterdam"
+DENIED = "⛔ Only group admins can change this."
+OWNER_ONLY = "⛔ Only the bot owner can do that."
+INVITE_ONLY = (
+    "🔒 This bot is invite-only. Ask the owner for a code, add me to your group, "
+    "then send /setup <code> there as a group admin."
+)
+CHECK_COOLDOWN_MINUTES = int(os.environ.get("CHECK_COOLDOWN_MINUTES", "10"))
+ADMIN_CACHE_SECONDS = 60
 
 COMMANDS = (
     ("panel", "Open the control panel"),
+    ("city", "List, add or remove cities"),
+    ("price", "Set the rent range"),
+    ("filters", "Show this group's filters"),
     ("status", "What the notifier is doing"),
     ("last", "When each source was last checked"),
     ("timezone", "Show or set the clock used for times"),
-    ("pause", "Stop all alerts"),
+    ("settopic", "Send alerts to this topic"),
+    ("pause", "Stop alerts for this group"),
     ("resume", "Start alerts again"),
     ("check", "Run a check right now"),
     ("help", "List the commands"),
-)
-
-HELP = (
-    "🎛 Rental notifier\n\n"
-    "/panel - buttons to pause and pick sources\n"
-    "/status - what is on and how much is tracked\n"
-    "/last - when each source was last checked\n"
-    "/timezone - show the clock, or /timezone Europe/Amsterdam to change it\n"
-    "/pause - stop all alerts\n"
-    "/resume - start alerts again\n"
-    "/check - run a check right now\n"
-    "/help - this message"
 )
 
 
@@ -63,124 +56,70 @@ def admin_ids(config):
     return {int(value) for value in ids}
 
 
-def is_admin(user_id, config):
+def is_owner(user_id, config):
     return user_id in admin_ids(config)
 
 
-def is_paused():
-    return store.get_setting(PAUSED_KEY, "0") == "1"
-
-
-def set_paused(paused):
-    store.set_setting(PAUSED_KEY, "1" if paused else "0")
-
-
-def source_enabled(config_key, config):
-    """
-    Config says how a source starts; a button tap outranks it from then on.
-
-    A source switched off in config.json cannot be switched on from Telegram,
-    because it may well have no search terms to run.
-    """
-    if not config.get(config_key, {}).get("enabled", False):
-        return False
-    return store.get_setting(SOURCE_KEY.format(config_key), "1") == "1"
-
-
-def set_source(config_key, enabled):
-    store.set_setting(SOURCE_KEY.format(config_key), "1" if enabled else "0")
-
-
 def configured_sources(config):
-    """Only sources with a config block are worth showing buttons for."""
+    """Only sources the owner has switched on globally get buttons."""
     return [key for key in registry.CONFIG_KEYS if config.get(key, {}).get("enabled", False)]
 
 
-def panel_text(config):
-    state = "⏸ Alerts are PAUSED" if is_paused() else "▶️ Alerts are running"
-    on = [registry.label(key) for key in configured_sources(config) if source_enabled(key, config)]
+def source_on(sub, key):
+    return key in sub.sources
+
+
+def user_zone(sub):
+    """The group's clock, falling back to UTC rather than failing a command."""
+    try:
+        return sub.timezone, ZoneInfo(sub.timezone)
+    except Exception:
+        log.warning("unknown timezone %r, showing UTC", sub.timezone)
+        return "UTC", utc_timezone.utc
+
+
+def panel_text(sub, config):
+    state = "⏸ Alerts are PAUSED" if sub.paused else "▶️ Alerts are running"
+    on = [registry.label(k) for k in configured_sources(config) if source_on(sub, k)]
     return (
         f"🎛 Notifier control\n\n{state}\n"
         f"Listening to: {', '.join(on) if on else 'nothing'}\n\n"
-        "Tap a source to switch it on or off."
+        "Tap a source to switch it on or off. /filters shows your cities and price."
     )
 
 
-def panel_keyboard(config):
+def panel_keyboard(sub, config):
     rows = []
     for key in configured_sources(config):
-        mark = "✅" if source_enabled(key, config) else "🚫"
+        mark = "✅" if source_on(sub, key) else "🚫"
         rows.append([{"text": f"{mark} {registry.label(key)}", "callback_data": f"toggle:{key}"}])
-
     power = (
         {"text": "▶️ Resume alerts", "callback_data": "resume"}
-        if is_paused()
+        if sub.paused
         else {"text": "⏸ Pause alerts", "callback_data": "pause"}
     )
     rows.append([power])
-    rows.append(
-        [
-            {"text": "⚡ Check now", "callback_data": "check"},
-            {"text": "🕒 Last checks", "callback_data": "last"},
-        ]
-    )
+    rows.append([
+        {"text": "⚡ Check now", "callback_data": "check"},
+        {"text": "🕒 Last checks", "callback_data": "last"},
+    ])
     rows.append([{"text": "🔄 Refresh", "callback_data": "refresh"}])
     return rows
 
 
-def status_text(config):
+def status_text(sub, config):
     counts = store.counts_by_source()
-    lines = ["⏸ Alerts are PAUSED" if is_paused() else "▶️ Alerts are running", ""]
+    lines = ["⏸ Alerts are PAUSED" if sub.paused else "▶️ Alerts are running", ""]
     for source in registry.SOURCES:
         key = source["config"]
         if not config.get(key, {}).get("enabled", False):
-            lines.append(f"➖ {source['label']} - not configured")
+            lines.append(f"➖ {source['label']} - not available")
             continue
-        mark = "✅" if source_enabled(key, config) else "🚫"
-        tracked = counts.get(source["store"], 0)
-        # Listings are filed under the store name, runs under the config
-        # name. Mixing the two makes Holland2Stay look like it never ran.
+        mark = "✅" if source_on(sub, key) else "🚫"
         elapsed = store.minutes_since_run(key)
         when = "never checked" if elapsed is None else f"checked {elapsed:.0f} min ago"
-        lines.append(f"{mark} {source['label']} - {tracked} tracked, {when}")
+        lines.append(f"{mark} {source['label']} - {counts.get(source['store'], 0)} tracked, {when}")
     return "\n".join(lines)
-
-
-def timezone_name(config=None):
-    """
-    The clock to print times on.
-
-    Telegram gives us no way to discover this. An update carries the sender's
-    id, name, language_code and a UTC timestamp - nothing about where they
-    are. So it is a setting: config supplies the starting value and
-    /timezone overrides it from then on.
-    """
-    stored = store.get_setting(TIMEZONE_KEY)
-    if stored:
-        return stored
-    configured = (config or {}).get("telegram", {}).get("timezone")
-    return configured or DEFAULT_TIMEZONE
-
-
-def user_zone(config=None):
-    """The named zone, falling back to UTC rather than failing a command."""
-    name = timezone_name(config)
-    try:
-        return name, ZoneInfo(name)
-    except Exception:
-        log.warning("unknown timezone %r, showing UTC", name)
-        return "UTC", utc_timezone.utc
-
-
-def set_timezone(name):
-    """Store a zone name, rejecting anything zoneinfo cannot resolve."""
-    name = name.strip()
-    try:
-        ZoneInfo(name)
-    except Exception:
-        raise ValueError(name)
-    store.set_setting(TIMEZONE_KEY, name)
-    return name
 
 
 def suggest_timezones(fragment, limit=8):
@@ -205,67 +144,55 @@ def _ago(minutes):
     return f"{hours / 24:.1f} days ago"
 
 
-def last_checks_text(config):
-    """
-    When each source last ran, on your clock.
-
-    A source is quiet for two very different reasons - nothing new, or it
-    never ran - and only the timestamp tells them apart.
-    """
-    name, zone = user_zone(config)
+def last_checks_text(sub, config):
+    """When each source last ran, on the group's clock."""
+    name, zone = user_zone(sub)
     now = datetime.now(utc_timezone.utc)
     lines = [f"🕒 Last checked  ({name})", ""]
-
     newest = None
     for source in registry.SOURCES:
         key = source["config"]
         if not config.get(key, {}).get("enabled", False):
-            lines.append(f"➖ {source['label']} - not configured")
+            lines.append(f"➖ {source['label']} - not available")
             continue
-
-        mark = "✅" if source_enabled(key, config) else "🚫"
+        mark = "✅" if source_on(sub, key) else "🚫"
         moment = store.last_run(key)
         if moment is None:
             lines.append(f"{mark} {source['label']} - never checked")
             continue
-
         newest = moment if newest is None else max(newest, moment)
         elapsed = (now - moment).total_seconds() / 60
         stamp = moment.astimezone(zone).strftime("%a %d %b, %H:%M")
         line = f"{mark} {source['label']} - {stamp}  ({_ago(elapsed)})"
-
-        # A source held back on purpose looks identical to a stalled one
-        # unless we say when it comes round again.
         wait = config.get(key, {}).get("min_interval_minutes")
         if wait and elapsed < wait:
             due = moment.timestamp() + wait * 60
             line += f"\n     next due {datetime.fromtimestamp(due, zone).strftime('%H:%M')}"
         lines.append(line)
-
     if newest is not None:
         stamp = newest.astimezone(zone).strftime("%a %d %b, %H:%M")
         lines.append(f"\nLast activity: {stamp}")
     return "\n".join(lines)
 
 
-def timezone_text(config, argument=None):
-    """Show the clock, or change it when given a name."""
+def timezone_text(sub, argument=None):
+    """Show the group's clock, or change it when given a name."""
     if not argument:
-        name, zone = user_zone(config)
+        name, zone = user_zone(sub)
         here = datetime.now(zone).strftime("%a %d %b, %H:%M")
         return (
             f"🕒 Times are shown in {name}\nRight now that is {here}.\n\n"
             "Change it with a zone name, for example:\n"
             "/timezone Europe/Amsterdam\n/timezone Asia/Tehran"
         )
-
+    name = argument.strip()
     try:
-        name = set_timezone(argument)
-    except ValueError:
-        hints = suggest_timezones(argument)
+        ZoneInfo(name)
+    except Exception:
+        hints = suggest_timezones(name)
         tail = "\n\nDid you mean:\n" + "\n".join(hints) if hints else ""
-        return f"❓ I do not know the zone {argument!r}.{tail}"
-
+        return f"❓ I do not know the zone {name!r}.{tail}"
+    subscriptions.set_timezone(sub.chat_id, name)
     here = datetime.now(ZoneInfo(name)).strftime("%a %d %b, %H:%M")
     return f"🕒 Times now shown in {name}.\nRight now that is {here}."
 
@@ -341,18 +268,22 @@ def _message_id(response):
 
 class Controller:
     """
-    Long-polls Telegram and applies whatever the admin asks for.
+    Long-polls Telegram and routes every command to the group it came from.
 
-    `run_now` is handed in rather than imported so this module never has to
-    know how a scrape cycle works.
+    Anyone in a registered group may read; only that group's admins (or the bot
+    owner) may change anything. Unregistered groups are ignored entirely, so a
+    stranger who adds the bot gets silence, not a menu.
     """
 
-    def __init__(self, bot, config, run_now, replies=None):
+    def __init__(self, bot, config, run_now, replies=None, clock=time.monotonic):
         self.bot = bot
         self.config = config
         self.run_now = run_now
         self.replies = replies or Replies(bot)
+        self.clock = clock
         self.offset = None
+        self.admin_cache = {}
+        self.last_check = {}
 
     # -- plumbing ---------------------------------------------------------
 
@@ -394,67 +325,170 @@ class Controller:
                     log.exception("failed to handle update")
 
     def handle(self, update):
-        # Logged so a silent bot can be told apart from one Telegram is not
-        # forwarding to - privacy mode hides plain group messages from bots.
         log.info("update %s", _describe(update))
+        if "my_chat_member" in update:
+            return self._handle_membership(update["my_chat_member"])
         if "message" in update:
             return self._handle_message(update["message"])
         if "callback_query" in update:
             return self._handle_callback(update["callback_query"])
+        return None
 
-    # -- commands ---------------------------------------------------------
+    # -- who may do what --------------------------------------------------
+
+    def is_admin(self, chat_id, user_id, message=None):
+        if is_owner(user_id, self.config):
+            return True
+        # An admin posting anonymously arrives as the group itself.
+        if message and (message.get("sender_chat") or {}).get("id") == chat_id:
+            return True
+        key, now = (chat_id, user_id), self.clock()
+        cached = self.admin_cache.get(key)
+        if cached and now - cached[0] < ADMIN_CACHE_SECONDS:
+            return cached[1]
+        result = self.bot.get_chat_member(chat_id, user_id) in ("creator", "administrator")
+        self.admin_cache[key] = (now, result)
+        return result
+
+    def _check_cooldown(self, chat_id, user_id):
+        """Minutes left before this group may /check again; 0 means go ahead."""
+        if is_owner(user_id, self.config):
+            return 0
+        now, last = self.clock(), self.last_check.get(chat_id)
+        window = CHECK_COOLDOWN_MINUTES * 60
+        if last is not None and now - last < window:
+            return int((window - (now - last)) // 60) + 1
+        self.last_check[chat_id] = now
+        return 0
+
+    # -- membership and migration ----------------------------------------
+
+    def _handle_membership(self, change):
+        chat = change.get("chat", {})
+        status = (change.get("new_chat_member") or {}).get("status")
+        if chat.get("type") in ("group", "supergroup") and status in ("left", "kicked"):
+            log.info("removed from chat %s, deactivating", chat.get("id"))
+            subscriptions.deactivate(chat["id"])
+
+    # -- messages ---------------------------------------------------------
 
     def _handle_message(self, message):
+        chat = message["chat"]
+        chat_id = chat["id"]
+
+        if message.get("migrate_to_chat_id"):
+            log.info("group %s became supergroup %s", chat_id, message["migrate_to_chat_id"])
+            return subscriptions.move_chat(chat_id, message["migrate_to_chat_id"])
+
         text = (message.get("text") or "").strip()
         if not text.startswith("/"):
-            return
-
+            return None
         # Group commands often arrive as /pause@our_h2stay_bot.
         command = text.split()[0].lstrip("/").split("@")[0].lower()
-        chat_id = message["chat"]["id"]
-        thread = message.get("message_thread_id")
+        argument = text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else ""
         user_id = message.get("from", {}).get("id")
 
-        # This command gets its own slot. Anything it says later replaces what
-        # it said before, and nothing it does touches an earlier command.
-        slot = self.replies.open(chat_id, thread)
+        if chat.get("type") == "private":
+            return self._handle_private(chat_id, user_id, command, argument)
 
-        if not is_admin(user_id, self.config):
-            log.warning("denied /%s from %s", command, user_id)
+        # message_thread_id also appears on plain replies in non-forum groups,
+        # where it must not be used. Only a real forum topic counts.
+        thread = message.get("message_thread_id") if message.get("is_topic_message") else None
+
+        if command == "setup":
+            return self._setup(message, chat, user_id, thread, argument)
+
+        sub = subscriptions.get_active(chat_id)
+        if sub is None:
+            log.info("ignoring /%s in unregistered chat %s", command, chat_id)
+            return None
+
+        slot = self.replies.open(chat_id, thread)
+        if not self.is_admin(chat_id, user_id, message):
+            log.warning("denied /%s from %s in %s", command, user_id, chat_id)
             return self.replies.send(slot, DENIED)
+        return self._command(sub, slot, command, argument, thread, user_id)
+
+    def _handle_private(self, chat_id, user_id, command, argument):
+        slot = self.replies.open(chat_id, None)
+        if not is_owner(user_id, self.config):
+            return self.replies.send(slot, INVITE_ONLY)
+        if command == "invite":
+            code = subscriptions.create_invite()
+            return self.replies.send(
+                slot,
+                f"🎟 Invite code: {code}\n\nIn your friend's group (they must be an admin): "
+                f"add this bot, then send\n/setup {code}\nThe code works once.",
+            )
+        if command == "groups":
+            subs = subscriptions.all_active()
+            lines = [f"{s.chat_id}  {s.title or '-'}  ({len(s.locations)} places"
+                     f"{', paused' if s.paused else ''})" for s in subs]
+            return self.replies.send(slot, "\n".join(lines) or "No active groups.")
+        if command == "revoke":
+            try:
+                target = int(argument)
+            except ValueError:
+                return self.replies.send(slot, "Usage: /revoke <chat id>")
+            subscriptions.deactivate(target)
+            return self.replies.send(slot, f"Switched off {target}.")
+        return self.replies.send(slot, commands.HELP_OWNER)
+
+    def _setup(self, message, chat, user_id, thread, argument):
+        chat_id = chat["id"]
+        slot = self.replies.open(chat_id, thread)
+        if not self.is_admin(chat_id, user_id, message):
+            return self.replies.send(slot, DENIED)
+        if subscriptions.get_active(chat_id):
+            return self.replies.send(slot, "✅ This group is already set up. Try /help.")
+        code = argument.strip()
+        if not code:
+            return self.replies.send(slot, commands.SETUP_USAGE)
+        sub = subscriptions.activate(code, chat_id, thread, chat.get("title") or "")
+        if sub is None:
+            return self.replies.send(slot, "❌ That invite code is not valid or was already used.")
+        where = "in this topic" if thread else "in this chat"
+        return self.replies.send(slot, commands.SETUP_DONE.format(where=where))
+
+    def _command(self, sub, slot, command, argument, thread, user_id):
+        chat_id = sub.chat_id
+        send = lambda text, keyboard=None: self.replies.send(slot, text, keyboard)
 
         if command in ("start", "help"):
-            return self.replies.send(slot, HELP)
+            return send(commands.HELP_GROUP)
         if command in ("panel", "sources", "control"):
-            return self.replies.send(
-                slot, panel_text(self.config), panel_keyboard(self.config)
-            )
+            return send(panel_text(sub, self.config), panel_keyboard(sub, self.config))
         if command == "status":
-            return self.replies.send(slot, status_text(self.config))
+            return send(status_text(sub, self.config))
         if command in ("last", "checks", "lastcheck"):
-            return self.replies.send(slot, last_checks_text(self.config))
+            return send(last_checks_text(sub, self.config))
         if command in ("timezone", "tz", "time"):
-            # Everything after the command word is the zone name.
-            argument = text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else None
-            return self.replies.send(slot, timezone_text(self.config, argument))
+            return send(timezone_text(sub, argument or None))
+        if command == "city":
+            return send(commands.city(chat_id, argument))
+        if command == "price":
+            return send(commands.price(chat_id, argument))
+        if command == "filters":
+            return send(commands.filters_text(sub))
         if command == "pause":
-            set_paused(True)
-            return self.replies.send(slot, "⏸ Alerts paused. Nothing will be sent.")
+            subscriptions.set_paused(chat_id, True)
+            return send("⏸ Alerts paused for this group.")
         if command in ("resume", "start_alerts"):
-            set_paused(False)
-            return self.replies.send(slot, "▶️ Alerts resumed.")
+            subscriptions.set_paused(chat_id, False)
+            return send("▶️ Alerts resumed.")
+        if command == "settopic":
+            subscriptions.set_topic(chat_id, thread)
+            return send("✅ Alerts will arrive in this topic." if thread
+                        else "✅ Alerts will arrive in the main chat.")
         if command in ("check", "run"):
-            # Acknowledge before starting. A quick cycle can finish and post
-            # its report first, and then the report would be the thing that
-            # gets replaced - leaving you staring at "checking now" forever.
-            self.replies.send(slot, "⚡ Checking all sources now…")
-            # Hand the slot over so the report lands on top of that "checking
-            # now" rather than beside it. A check that finds nothing must
-            # still say so: silence is indistinguishable from a dead bot.
-            if not self.run_now(reply_to=slot):
-                return self.replies.send(slot, "⏳ A check is already running.")
+            wait = self._check_cooldown(chat_id, user_id)
+            if wait:
+                return send(f"⏳ Try again in about {wait} min.")
+            send("⚡ Checking now…")
+            if not self.run_now(reply_to=slot, force=is_owner(user_id, self.config)):
+                return send("⏳ A check is already running.")
             return None
-        return self.replies.send(slot, HELP)
+        return send(commands.HELP_GROUP)
 
     # -- buttons ----------------------------------------------------------
 
@@ -464,38 +498,44 @@ class Controller:
         message = query.get("message") or {}
         chat_id = message.get("chat", {}).get("id")
         message_id = message.get("message_id")
+        thread = message.get("message_thread_id") if message.get("is_topic_message") else None
 
-        if not is_admin(user_id, self.config):
+        sub = subscriptions.get_active(chat_id) if chat_id else None
+        if sub is None:
+            return self.bot.answer_callback(query["id"], "This group is not set up.", alert=True)
+        if not self.is_admin(chat_id, user_id):
             log.warning("denied button %r from %s", data, user_id)
             return self.bot.answer_callback(query["id"], DENIED, alert=True)
 
         note = "Updated"
         if data.startswith("toggle:"):
             key = data.split(":", 1)[1]
-            now_on = not source_enabled(key, self.config)
-            set_source(key, now_on)
-            note = f"{registry.label(key)} {'on' if now_on else 'off'}"
+            if key in configured_sources(self.config):
+                now_on = key not in sub.sources
+                subscriptions.set_source(chat_id, key, now_on)
+                note = f"{registry.label(key)} {'on' if now_on else 'off'}"
         elif data == "pause":
-            set_paused(True)
+            subscriptions.set_paused(chat_id, True)
             note = "Alerts paused"
         elif data == "resume":
-            set_paused(False)
+            subscriptions.set_paused(chat_id, False)
             note = "Alerts resumed"
         elif data == "check":
-            # A tap is its own command, so the report gets a fresh slot and
-            # will not swallow the panel that is sitting right above it.
-            slot = self.replies.open(chat_id, message.get("message_thread_id"))
-            note = "Checking now…" if self.run_now(reply_to=slot) else "Already running"
+            wait = self._check_cooldown(chat_id, user_id)
+            if wait:
+                note = f"Try again in about {wait} min"
+            else:
+                slot = self.replies.open(chat_id, thread)
+                forced = is_owner(user_id, self.config)
+                note = "Checking now…" if self.run_now(reply_to=slot, force=forced) else "Already running"
         elif data == "last":
-            # Same reasoning: its own slot, posted below the untouched panel.
-            slot = self.replies.open(chat_id, message.get("message_thread_id"))
-            self.replies.send(slot, last_checks_text(self.config))
+            slot = self.replies.open(chat_id, thread)
+            self.replies.send(slot, last_checks_text(sub, self.config))
             note = "Last checks"
 
         self.bot.answer_callback(query["id"], note)
-        if chat_id and message_id:
-            # The panel is edited where it stands, so it stays put no matter
-            # what else the bot says afterwards.
+        if message_id:
+            fresh = subscriptions.get(chat_id)
             self.bot.edit_text(
-                chat_id, message_id, panel_text(self.config), panel_keyboard(self.config)
+                chat_id, message_id, panel_text(fresh, self.config), panel_keyboard(fresh, self.config)
             )
