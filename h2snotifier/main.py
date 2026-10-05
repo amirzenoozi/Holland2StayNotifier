@@ -9,23 +9,21 @@ After that seed every new listing is sent, however many turn up at once.
 import json
 import logging
 import os
-import re
 import sys
 import threading
-import time
-import unicodedata
 from functools import partial
 
 import control
+import dispatch
 import funda
-import geo
 import h2s
 import huurwoningen
 import ikwilhuren
+import migration
 import pararius
 import registry
-import render
 import store
+import subscriptions
 from fetcher import FetchError, SiteUnavailable
 from telegram import TelegramBot
 
@@ -57,22 +55,15 @@ def _seed(source, keys, debug):
         )
 
 
-def _notify(listing, notifier, city=None):
-    response = notifier.send_simple_msg(
-        render.listing_to_msg(listing), button=render.listing_button(listing)
-    )
-    ok = getattr(response, "ok", False)
-    log.info("notified %s (%s) ok=%s", listing["url_key"], city or listing.get("city"), ok)
-    time.sleep(3)
-    return ok
-
-
-def run_h2s(config, notifier, debug):
+def run_h2s(config, subs, bot, debug):
     """
     Holland2Stay: the sitemap gives keys only, so the city lives behind a
-    per-listing fetch. We cache street -> city to keep that fetch rare.
+    per-listing fetch. We cache street -> city to keep that fetch rare, and
+    only look up cities that at least one group watches.
     """
-    targets = {c.strip().lower() for c in config.get("cities", [])}
+    targets = subscriptions.cities_for("holland2stay", subs)
+    if not targets:
+        return {"seen": 0, "new": 0, "sent": 0, "note": "no group watches it"}
     max_lookups = config.get("max_lookups_per_cycle", 15)
 
     known = store.known_keys(source=h2s.NAME)
@@ -119,78 +110,75 @@ def run_h2s(config, notifier, debug):
             store.learn_street(prefix, city)
 
         if city and city.lower() in targets:
-            ok = _notify(listing, notifier, city)
-            sent += bool(ok)
-            store.record(url_key, city=city, notified=ok, source=h2s.NAME)
+            sent += dispatch.fan_out(listing, subs, bot)
         else:
             log.info("h2s: skipping %s (%s) - not a watched city", url_key, city)
-            store.record(url_key, city=city, notified=True, source=h2s.NAME)
+        store.record(url_key, city=city, notified=True, source=h2s.NAME)
 
     return {"seen": len(current), "new": len(new_keys), "sent": sent}
 
 
-def run_search_source(module, config, notifier, debug):
+def run_search_source(module, key, config, subs, bot, debug):
     """
-    Funda and Huurwoningen both put the full listing data on the search page,
-    so a cycle is one fetch per configured search and no detail lookups.
+    Funda, Pararius and Huurwoningen put the full listing data on the search
+    page. The searches are the deduplicated set every group needs (see
+    subscriptions.rebuild_searches), so a city two groups watch is fetched once.
+
+    A search seen for the first time is absorbed silently: adding a city to a
+    group must not replay that city's whole back catalogue.
     """
     name = module.NAME
-    searches = config.get("searches", [])
+    searches = subscriptions.searches_for(key)
     if not searches:
-        log.warning("%s: enabled but no searches configured", name)
-        return {"seen": 0, "new": 0, "sent": 0, "note": "no searches configured"}
+        return {"seen": 0, "new": 0, "sent": 0, "note": "no group watches it"}
 
     known = store.known_keys(source=name)
-    found = {}
+    fetched = {}
     failed = 0
     for search in searches:
         try:
-            found.update(module.fetch_search(search))
+            fetched[search] = module.fetch_search(search.fetch_args())
         except FetchError as exc:
             failed += 1
-            log.error("%s: search %r failed: %s", name, search.get("name"), exc)
+            log.error("%s: search %r failed: %s", name, search.city, exc)
 
-    if not found:
+    if not any(fetched.values()):
         return {"seen": 0, "new": 0, "sent": 0, "note": "no results"}
 
+    found = {}
+    for search, listings in fetched.items():
+        if search.seeded:
+            found.update(listings)
     new_keys = sorted(set(found) - known)
     log.info("%s: %d listings, %d new", name, len(found), len(new_keys))
 
-    note = f"{failed} search(es) failed" if failed else None
-    if not known:
-        _seed(name, set(found), debug)
-        return {"seen": len(found), "new": 0, "sent": 0, "note": "seeded"}
-    if not new_keys:
-        return {"seen": len(found), "new": 0, "sent": 0, "note": note}
-
-    # Everything new goes out, however many there are. _notify paces the sends
-    # and telegram.py backs off when Telegram asks it to.
     sent = 0
     for url_key in new_keys:
         listing = found[url_key]
-        ok = _notify(listing, notifier)
-        sent += bool(ok)
-        store.record(url_key, city=listing.get("city"), notified=ok, source=name)
+        sent += dispatch.fan_out(listing, subs, bot)
+        store.record(url_key, city=listing.get("city"), notified=True, source=name)
 
-    return {"seen": len(found), "new": len(new_keys), "sent": sent, "note": note}
+    fresh = {search: listings for search, listings in fetched.items() if not search.seeded}
+    fresh_keys = {k for listings in fresh.values() for k in listings}
+    if fresh:
+        _seed(name, fresh_keys, debug)
+        for search in fresh:
+            subscriptions.mark_seeded(key, search)
+
+    note = f"{failed} search(es) failed" if failed else None
+    return {"seen": len(set(found) | fresh_keys), "new": len(new_keys), "sent": sent, "note": note}
 
 
-def run_ikwilhuren(config, notifier, debug):
+def run_ikwilhuren(config, subs, bot, debug):
     """
     ikwilhuren.nu hands us the whole country in one free request, so the work
-    is filtering rather than fetching: we keep a record of every listing we
-    have seen (that is what makes the next diff correct) but only notify about
-    the places being watched.
-
-    Two ways to say what to watch, and a listing only has to satisfy one of
-    them: `cities` names towns exactly, `areas` draws circles on the map. The
-    circles are the useful one - "within 40 km of Nijkerk" catches villages
-    you would never have thought to name.
+    is deciding who each new listing is for. Each group's cities and radii
+    (matcher) say which; the circles are the useful part - "within 40 km of
+    Nijkerk" catches villages nobody would think to name.
     """
     name = ikwilhuren.NAME
-    targets = {c.strip().lower() for c in config.get("cities", [])}
-    areas = geo.resolve_areas(config.get("areas"))
-    filtering = bool(targets or areas)
+    if not subscriptions.wants("ikwilhuren", subs):
+        return {"seen": 0, "new": 0, "sent": 0, "note": "no group watches it"}
 
     known = store.known_keys(source=name)
     found = ikwilhuren.fetch_catalogue()
@@ -206,46 +194,37 @@ def run_ikwilhuren(config, notifier, debug):
     sent = 0
     for url_key in new_keys:
         listing = found[url_key]
-        city = listing.get("city") or ""
-
-        if filtering and city.strip().lower() not in targets:
-            area = geo.area_match(listing, areas)
-            if not area:
-                store.record(url_key, city=city, notified=True, source=name)
-                continue
-            log.info("%s: %s is inside %s", name, city or url_key, area["place"])
-
-        ok = _notify(listing, notifier, city)
-        sent += bool(ok)
-        store.record(url_key, city=city, notified=ok, source=name)
-
+        sent += dispatch.fan_out(listing, subs, bot)
+        store.record(url_key, city=listing.get("city"), notified=True, source=name)
     return {"seen": len(found), "new": len(new_keys), "sent": sent}
 
 
-def run_cycle(config, notifier, debug, force=False):
+def run_cycle(config, bot, debug, force=False):
     """
-    Poll every enabled source once and return what each one did.
+    Poll every source someone wants once and return what each one did.
 
-    `force` is what /check sets: when you ask for a check by hand you mean
-    all of them, so the per-source interval that exists to save credits is
-    stood down for that one run.
+    `force` is what the owner's /check sets: the per-source interval that
+    exists to save credits is stood down for that one run. Other groups' /check
+    never forces, so they cannot burn credits.
     """
     store.init()
+    subscriptions.rebuild_searches()
+    subs = subscriptions.all_active()
+    dispatch.retry_pending(subs, bot)
     failures = []
     results = {}
 
     runners = (
         ("holland2stay", run_h2s),
-        ("funda", partial(run_search_source, funda)),
-        ("huurwoningen", partial(run_search_source, huurwoningen)),
-        ("pararius", partial(run_search_source, pararius)),
+        ("funda", partial(run_search_source, funda, "funda")),
+        ("huurwoningen", partial(run_search_source, huurwoningen, "huurwoningen")),
+        ("pararius", partial(run_search_source, pararius, "pararius")),
         ("ikwilhuren", run_ikwilhuren),
     )
     for name, runner in runners:
         source_config = config.get(name, {})
-        # config.json decides what exists; the control panel decides what
-        # is listening right now.
-        if not control.source_enabled(name, config):
+        # config.json says which sources exist at all; groups say who wants them.
+        if not source_config.get("enabled", False) or not subscriptions.wants(name, subs):
             results[name] = {"skipped": "off"}
             continue
 
@@ -260,7 +239,7 @@ def run_cycle(config, notifier, debug, force=False):
 
         try:
             store.mark_run(name)
-            results[name] = runner(source_config, notifier, debug) or {}
+            results[name] = runner(source_config, subs, bot, debug) or {}
         except SiteUnavailable as exc:
             # Maintenance windows and 5xx blips clear on their own; there is
             # nothing to act on, so stay quiet and try again next cycle.
@@ -310,32 +289,29 @@ class Scheduler:
     run under a lock and /check simply declines when the lock is taken.
     """
 
-    def __init__(self, config, notifier, debug, interval, replies=None):
+    def __init__(self, config, bot, debug, interval, replies=None):
         self.config = config
-        self.notifier = notifier
+        self.bot = bot
         self.debug = debug
         self.interval = interval
         # Shared with the control panel so a check report replaces the
         # "checking now" line instead of stacking another message on it.
-        self.replies = replies or control.Replies(notifier)
+        self.replies = replies or control.Replies(bot)
         self.lock = threading.Lock()
         self.wakeup = threading.Event()
         self.stop = threading.Event()
         # The reply slot to report into, set by /check and cleared once used.
         self.reply_to = None
+        self.force = False
 
     def cycle(self, force=False):
         """Run one cycle if none is running. Returns False if one already is."""
         if not self.lock.acquire(blocking=False):
             return False
         reply_to, self.reply_to = self.reply_to, None
+        force, self.force = force or self.force, False
         try:
-            if control.is_paused():
-                log.info("paused, skipping cycle")
-                if reply_to:
-                    self.replies.send(reply_to, "⏸ Alerts are paused - nothing was checked.")
-                return True
-            results = run_cycle(self.config, self.notifier, self.debug, force=force or bool(reply_to))
+            results = run_cycle(self.config, self.bot, self.debug, force=force)
             if reply_to:
                 self.replies.send(reply_to, summarise(results))
         except Exception as exc:
@@ -348,11 +324,12 @@ class Scheduler:
             self.lock.release()
         return True
 
-    def request_cycle(self, reply_to=None):
+    def request_cycle(self, reply_to=None, force=False):
         """Ask for a cycle now; used by /check. False means one is running."""
         if self.lock.locked():
             return False
         self.reply_to = reply_to
+        self.force = force
         self.wakeup.set()
         return True
 
@@ -376,20 +353,16 @@ def main():
         log.error("TELEGRAM_API_KEY is not set")
         return 1
 
-    telegram_config = config.get("telegram", {})
-    notifier = TelegramBot(
-        apikey,
-        chat_id=telegram_config["chat_id"],
-        message_thread_id=telegram_config.get("topic_id"),
-    )
+    bot = TelegramBot(apikey)
 
     debug_chat = os.environ.get("DEBUGGING_CHAT_ID")
     debug = TelegramBot(apikey, chat_id=debug_chat) if debug_chat else None
 
     store.init()
+    migration.migrate_from_config(config)
     interval = int(os.environ.get("RUN_INTERVAL", 3600))
-    replies = control.Replies(notifier)
-    scheduler = Scheduler(config, notifier, debug, interval, replies)
+    replies = control.Replies(bot)
+    scheduler = Scheduler(config, bot, debug, interval, replies)
 
     # One-shot mode keeps `docker exec ... python main.py` working for a
     # manual check. It must not poll: two pollers on one token fight, and
@@ -399,9 +372,9 @@ def main():
         return 0
 
     if not control.admin_ids(config):
-        log.warning("no telegram.admin_ids in config - the control panel will refuse everyone")
+        log.warning("no telegram.admin_ids in config - nobody can issue invites")
 
-    controller = control.Controller(notifier, config, scheduler.request_cycle, replies)
+    controller = control.Controller(bot, config, scheduler.request_cycle, replies)
     listener = threading.Thread(target=controller.listen_forever, daemon=True)
     listener.start()
 
