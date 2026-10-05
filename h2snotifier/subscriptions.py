@@ -209,3 +209,155 @@ def move_chat(old_id, new_id):
             "UPDATE subscriptions SET chat_id = ?, active = 1 WHERE chat_id = ?",
             (new_id, old_id),
         )
+
+
+# The radius choices each site's own search offers. A requested radius is
+# rounded UP to the next step so the fetch never misses a listing; the exact
+# distance is enforced afterwards by matcher. Funda's steps are its UI's;
+# Pararius/Huurwoningen reuse the values the project's config already used
+# (10, 15, 20, 25) - verify against the sites if a search 404s.
+RADIUS_STEPS = {
+    "funda": (1, 2, 5, 10, 15, 30, 50),
+    "pararius": (1, 2, 5, 10, 15, 20, 25, 50),
+    "huurwoningen": (1, 2, 5, 10, 15, 20, 25, 50),
+}
+
+
+def radius_bucket(source, km):
+    """The radius to fetch with. 0.0 means "just that city"."""
+    if not km:
+        return 0.0
+    steps = RADIUS_STEPS.get(source)
+    if not steps:
+        return float(km)
+    for step in steps:
+        if km <= step:
+            return float(step)
+    return float(steps[-1])
+
+
+@dataclass(frozen=True)
+class Search:
+    city: str          # lowercase
+    radius_km: float   # 0.0 = exact city
+    seeded: bool
+
+    def fetch_args(self):
+        """The dict the source modules' fetch_search() expects."""
+        args = {
+            "name": f"{self.city} {self.radius_km:g}km" if self.radius_km else self.city,
+            "area": self.city.replace(" ", "-"),
+        }
+        if self.radius_km:
+            args["radius"] = f"{self.radius_km:g}km"
+        return args
+
+
+def _search_set(subs):
+    keys = set()
+    for sub in subs:
+        for source in PAID_SOURCES:
+            if source not in sub.sources:
+                continue
+            for loc in sub.locations_for(source):
+                keys.add((source, loc.city.strip().lower(), radius_bucket(source, loc.radius_km)))
+    return keys
+
+
+def add_location(chat_id, city, radius_km=None, source="", enforce=True):
+    """
+    Add or replace one city. `enforce` applies the per-group and global caps;
+    migration passes False so an existing setup is never rejected.
+    """
+    city = city.strip()
+    if enforce:
+        sub = get_active(chat_id)
+        if sub is not None:
+            same = lambda loc: loc.city.lower() == city.lower() and loc.source == source
+            if not any(same(loc) for loc in sub.locations) and source == "":
+                owned = [loc for loc in sub.locations if loc.source == ""]
+                if len(owned) >= MAX_CITIES:
+                    raise LimitError(f"A group can watch at most {MAX_CITIES} cities.")
+            others = [s for s in all_active() if s.chat_id != chat_id]
+            kept = [loc for loc in sub.locations if not same(loc)]
+            before = _search_set(others + [sub])
+            after = _search_set(
+                others + [replace(sub, locations=kept + [Location(city, radius_km, source)])]
+            )
+            if len(after) > MAX_SEARCHES and len(after) > len(before):
+                raise LimitError(
+                    "The bot is at its limit of distinct searches - ask the owner to raise it."
+                )
+    with store.connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO sub_locations (chat_id, city, radius_km, source)"
+            " VALUES (?, ?, ?, ?)",
+            (chat_id, city, radius_km, source),
+        )
+
+
+def remove_location(chat_id, city):
+    """Remove a city from every source it was set for. False if it was not there."""
+    with store.connect() as connection:
+        return connection.execute(
+            "DELETE FROM sub_locations WHERE chat_id = ? AND city = ?", (chat_id, city.strip())
+        ).rowcount > 0
+
+
+def rebuild_searches():
+    """Make the `searches` table match what active groups currently need."""
+    wanted = _search_set(all_active())
+    with store.connect() as connection:
+        have = {
+            (source, city.lower(), radius)
+            for source, city, radius in connection.execute(
+                "SELECT source, city, radius_km FROM searches"
+            )
+        }
+        for key in have - wanted:
+            connection.execute(
+                "DELETE FROM searches WHERE source = ? AND city = ? AND radius_km = ?", key
+            )
+        for key in wanted - have:
+            connection.execute(
+                "INSERT INTO searches (source, city, radius_km, seeded) VALUES (?, ?, ?, 0)", key
+            )
+    return wanted
+
+
+def searches_for(config_key):
+    with store.connect() as connection:
+        rows = connection.execute(
+            "SELECT city, radius_km, seeded FROM searches WHERE source = ? ORDER BY city, radius_km",
+            (config_key,),
+        ).fetchall()
+    return [Search(city.lower(), radius, bool(seeded)) for city, radius, seeded in rows]
+
+
+def mark_seeded(config_key, search):
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE searches SET seeded = 1 WHERE source = ? AND city = ? AND radius_km = ?",
+            (config_key, search.city, search.radius_km),
+        )
+
+
+def mark_source_seeded(config_key):
+    """For migration: the source already has history, so nothing needs seeding."""
+    with store.connect() as connection:
+        connection.execute("UPDATE searches SET seeded = 1 WHERE source = ?", (config_key,))
+
+
+def wants(config_key, subs):
+    """Does any group want this source at all? If not, skip fetching it."""
+    return any(config_key in sub.sources and sub.locations_for(config_key) for sub in subs)
+
+
+def cities_for(config_key, subs):
+    """Lowercase city names any group watches for this source."""
+    return {
+        loc.city.strip().lower()
+        for sub in subs
+        if config_key in sub.sources
+        for loc in sub.locations_for(config_key)
+    }
