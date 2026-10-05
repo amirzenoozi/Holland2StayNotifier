@@ -15,8 +15,16 @@ services:
       # speeding this up does not speed those up. 120 is set for
       # ikwilhuren.nu, which is free and has no hold-back of its own.
       RUN_INTERVAL: 120
+      # Friends' groups: how many cities one group may watch, how many distinct
+      # paid searches the whole bot may run (each costs Firecrawl credits), and
+      # how often a non-owner group may press /check.
+      MAX_CITIES_PER_GROUP: 5
+      MAX_DISTINCT_SEARCHES: 30
+      CHECK_COOLDOWN_MINUTES: 10
     volumes:
-      # Cities to watch + Telegram chat/topic. Edit, then `docker compose restart`.
+      # Global source settings and the owner ids. On first start the old per-chat keys
+      # (chat, topic, cities, searches) are copied into the database once; after
+      # that groups are managed from Telegram. Edit, then `docker compose restart`.
       - ./config.json:/app/config.json:ro
       # Seen listings, the learned street->city map and the geocode cache,
       # in ./data/listings.db right next to this file so you can back it up

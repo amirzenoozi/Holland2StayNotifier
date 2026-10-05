@@ -260,12 +260,16 @@ touching the server.
 | Command | What it does |
 | --- | --- |
 | `/panel` | the control panel — buttons to pause and to pick sources |
+| `/city` | list your cities; `/city add Utrecht 10` (radius in km is optional); `/city remove Utrecht` |
+| `/price 800 1800` | minimum and maximum rent; `-` means no limit, `/price clear` removes it |
+| `/filters` | show this group's cities, price range and sources |
 | `/status` | what is on, how much is tracked, when each source last ran |
-| `/pause` | stop all alerts |
+| `/pause` | stop alerts for this group |
 | `/resume` | start them again |
-| `/check` | run a check right now instead of waiting for the hour |
+| `/check` | run a check right now instead of waiting |
 | `/last` | when each source was last checked, and when it is next due |
 | `/timezone` | show the clock times are printed in, or set it: `/timezone Europe/Amsterdam` |
+| `/settopic` | send this group's alerts to the topic you type it in |
 | `/help` | list the commands |
 
 The panel draws one button per source, marked ✅ when it is on and 🚫 when it is
@@ -315,11 +319,43 @@ restarts and image updates. `config.json` decides which sources *exist*; the
 panel decides which are listening right now. A source turned off in the file
 cannot be turned on from Telegram — it may have no search terms to run.
 
-Only the Telegram user ids in `telegram.admin_ids` can change anything.
-Everyone else — typing a command or tapping a button on a panel someone left in
-the chat — gets `⛔ You do not have access to this feature, call AmirKhan!`. To
-find your id, message [@RawDataBot](https://t.me/RawDataBot) and read
-`message.from.id`.
+Only admins of a group can change that group's settings, and every group's
+settings are separate — pausing one group does not pause another. The bot owner
+(`telegram.admin_ids`) is an admin everywhere. To find your id, message
+[@RawDataBot](https://t.me/RawDataBot) and read `message.from.id`.
+
+## Sharing the bot with friends
+
+One running bot can serve many groups, each with its own cities, price range and
+topic. Nobody needs a token or server access.
+
+1. **You** (an id in `telegram.admin_ids`) send `/invite` to the bot in a private
+   chat. It replies with a one-time code.
+2. **Your friend** adds the bot to their group. A group admin sends
+   `/setup <code>` — inside a topic if the group has topics and they want the
+   alerts there, otherwise in the main chat.
+3. They set their filters: `/city add Utrecht 10`, `/price 800 1800`, `/panel`.
+   Until a city is added, nothing is sent.
+
+`/groups` (private chat) lists the active groups and `/revoke <chat id>` switches
+one off. Strangers who add the bot to a group get no response, and a removed bot
+deactivates its group automatically. A group that is upgraded to a supergroup
+(for example when topics are turned on) keeps its settings.
+
+How it stays cheap: Funda, Pararius and Huurwoningen cost a Firecrawl credit per
+fetch, so each distinct city + radius is fetched **once** and shared by every
+group watching it. Limits (set in `docker-compose.yml`): `MAX_CITIES_PER_GROUP`
+(default 5), `MAX_DISTINCT_SEARCHES` (default 30) and `CHECK_COOLDOWN_MINUTES`
+(default 10; the owner is never throttled). Holland2Stay matches the exact city
+name only; the other sources also honour the radius.
+
+**Upgrading from the single-group version.** On the first start the old
+`config.json` keys (`telegram.chat_id`/`topic_id`, cities, searches, areas) are
+copied into the database as your group's subscription, keeping the per-source
+city lists you had. The price filter that used to live inside the paid sources'
+searches becomes the group's single price range — change it with `/price`. After
+that the file only supplies global settings (`admin_ids`, which sources exist,
+`min_interval_minutes`). Back up `./data/listings.db` first.
 
 ## Configuration reference
 
@@ -432,7 +468,13 @@ docker-compose.yml        # what you run
 config.example.json
 h2snotifier/
   main.py                 # scrape loop + cycle over enabled sources
-  control.py              # Telegram commands and the control panel
+  control.py              # Telegram routing: setup, invites, panels, per-group commands
+  commands.py             # /city, /price, /filters text handlers
+  subscriptions.py        # groups: filters, invites, the shared search set
+  matcher.py              # does this listing belong in this group's chat
+  dispatch.py             # send to every matching group; pacing, retries
+  migration.py            # config.json -> first group, once
+  render.py               # listing -> Telegram message
   registry.py             # the list of sources, in one place
   fetcher.py              # shared plain-HTTP + Firecrawl fetch layer
   h2s.py                  # Holland2Stay: sitemap + detail parsing
