@@ -42,6 +42,53 @@ CREATE TABLE IF NOT EXISTS places (
     lon         REAL,
     looked_up_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS subscriptions (
+    chat_id    INTEGER PRIMARY KEY,
+    topic_id   INTEGER,
+    title      TEXT NOT NULL DEFAULT '',
+    price_min  INTEGER,
+    price_max  INTEGER,
+    timezone   TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+    paused     INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sub_locations (
+    chat_id   INTEGER NOT NULL,
+    city      TEXT NOT NULL COLLATE NOCASE,
+    radius_km REAL,
+    source    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chat_id, city, source)
+);
+CREATE TABLE IF NOT EXISTS sub_sources (
+    chat_id INTEGER NOT NULL,
+    source  TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (chat_id, source)
+);
+CREATE TABLE IF NOT EXISTS invites (
+    code         TEXT PRIMARY KEY,
+    created_at   TEXT NOT NULL,
+    used_by_chat INTEGER,
+    used_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS searches (
+    source    TEXT NOT NULL,
+    city      TEXT NOT NULL COLLATE NOCASE,
+    radius_km REAL NOT NULL DEFAULT 0,
+    seeded    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, city, radius_km)
+);
+CREATE TABLE IF NOT EXISTS deliveries (
+    chat_id  INTEGER NOT NULL,
+    source   TEXT NOT NULL,
+    url_key  TEXT NOT NULL,
+    ok       INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    payload  TEXT,
+    sent_at  TEXT NOT NULL,
+    PRIMARY KEY (chat_id, source, url_key)
+);
 """
 
 
@@ -60,6 +107,12 @@ def _connect():
         connection.commit()
     finally:
         connection.close()
+
+
+# Public names for the other modules; the underscore versions stay for the
+# helpers below that predate them.
+connect = _connect
+now = _now
 
 
 def init():
@@ -239,3 +292,43 @@ def stats():
         listings = connection.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
         streets = connection.execute("SELECT COUNT(*) FROM streets").fetchone()[0]
     return {"listings": listings, "streets": streets}
+
+
+def delivery_exists(chat_id, source, url_key):
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM deliveries WHERE chat_id = ? AND source = ? AND url_key = ?",
+            (chat_id, source, url_key),
+        ).fetchone()
+    return row is not None
+
+
+def record_delivery(chat_id, source, url_key, ok, payload=None):
+    """Remember that a listing went (or failed to go) to one group."""
+    with _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO deliveries"
+            " (chat_id, source, url_key, ok, attempts, payload, sent_at)"
+            " VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (chat_id, source, url_key, 1 if ok else 0, None if ok else payload, _now()),
+        )
+
+
+def pending_deliveries(max_attempts):
+    """Failed sends still worth retrying, with the listing to resend."""
+    with _connect() as connection:
+        return connection.execute(
+            "SELECT chat_id, source, url_key, attempts, payload FROM deliveries"
+            " WHERE ok = 0 AND attempts < ? AND payload IS NOT NULL",
+            (max_attempts,),
+        ).fetchall()
+
+
+def update_delivery(chat_id, source, url_key, ok, attempts):
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE deliveries SET ok = ?, attempts = ?, sent_at = ?,"
+            " payload = CASE WHEN ? THEN NULL ELSE payload END"
+            " WHERE chat_id = ? AND source = ? AND url_key = ?",
+            (1 if ok else 0, attempts, _now(), 1 if ok else 0, chat_id, source, url_key),
+        )

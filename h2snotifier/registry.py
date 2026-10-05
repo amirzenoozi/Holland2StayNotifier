@@ -28,3 +28,5 @@ CONFIG_LABELS = {source["config"]: source["label"] for source in SOURCES}
 
 def label(config_key):
     return CONFIG_LABELS.get(config_key, config_key)
+STORE_TO_CONFIG = {source["store"]: source["config"] for source in SOURCES}
+CONFIG_TO_STORE = {source["config"]: source["store"] for source in SOURCES}
