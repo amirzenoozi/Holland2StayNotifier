@@ -29,7 +29,7 @@ BENIGN = (
 
 
 class TelegramBot:
-    def __init__(self, apikey, chat_id, message_thread_id=None):
+    def __init__(self, apikey, chat_id=None, message_thread_id=None):
         self.apikey = apikey
         self.chat_id = chat_id
         self.message_thread_id = message_thread_id
