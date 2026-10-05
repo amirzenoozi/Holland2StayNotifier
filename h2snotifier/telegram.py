@@ -125,6 +125,15 @@ class TelegramBot:
             payload["show_alert"] = "true"
         return self._post("answerCallbackQuery", payload, retries=0)
 
+    def get_chat_member(self, chat_id, user_id):
+        """The user's role in a chat ('creator', 'administrator', 'member', ...) or None."""
+        response = self._post(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}, retries=0
+        )
+        if response is None or not response.ok:
+            return None
+        return response.json().get("result", {}).get("status")
+
     def set_commands(self, commands):
         """Populate the / menu so the commands are discoverable."""
         return self._post(
@@ -142,7 +151,7 @@ class TelegramBot:
         """
         payload = {
             "timeout": timeout,
-            "allowed_updates": json.dumps(["message", "callback_query"]),
+            "allowed_updates": json.dumps(["message", "callback_query", "my_chat_member"]),
         }
         if offset is not None:
             payload["offset"] = offset
